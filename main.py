@@ -340,7 +340,7 @@ def df_to_event_list(df, client_id, file_id, accountant_id):
         event['accountant_id'] = accountant_id
         if event['Category'] not in name_to_id_map:
             res = upsert_category(event['Category'])
-            name_to_id_map[event['Category']] = res.data[0]['id']
+            name_to_id_map[event['Category']] = res[0]['id']
             
         event['category_id'] = name_to_id_map[event['Category']]
         event['confidence'] = event['Confidence']
