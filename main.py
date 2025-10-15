@@ -15,12 +15,23 @@ import requests
 import asyncio
 import logging
 import io
+import logging
+import sys
 
+# Force logs to stdout and set formatting
 logging.basicConfig(
-    level=logging.INFO,  # Set log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)]
 )
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger("app")  # or __name__
+
+# logging.basicConfig(
+#     level=logging.INFO,  # Set log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+#     format="%(asctime)s [%(levelname)s] %(message)s",
+# )
+# logger = logging.getLogger(__name__)
 
 
 
@@ -437,6 +448,7 @@ async def classifier_main(file_list, name, mob_no, client_id, file_id, accountan
             df = pd.read_csv(io.StringIO(file.content.decode('utf-8')))
             ## columns intent
             map = csv_col_identify(df.columns, client, model)
+            logger.info(f"columns from the csv files: {map}")
             df = df.rename(columns=map)
             # Step 2: Keep only columns present in mapping
             df = df[[col for col in map.values() if col in df.columns]]
