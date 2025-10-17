@@ -298,17 +298,16 @@ def csv_col_identify(cols, client, model):
     
     prompt = f"""
     You are a bank statement structure identifier.
-    Identify which columns from the list below correspond to:
+    Identify which columns from the list provided correspond to:
       - 'Narration' (transaction description)
       - 'Credit Amount' (incoming money)
       - 'Debit Amount' (outgoing money)
       - 'Date' (transaction date)
     
     Rules:
-    - If there is only one amount-related column, classify it as 'Debit Amount' and keep 'Credit Amount' as 0.
-    - If you are not sure, make the best guess based on column name semantics (e.g., "cr", "dr", "txn_date", "details").
+    - If you are not sure, make the best guess based on column name semantics (e.g., "cr", "dr", "txn_date", "details", "withdraw", "deposit").
     - Return ONLY valid JSON with keys exactly as:
-        {{<column_name>: "Narration", <column_name or 0> : "Credit Amount", <column_name or 0> : "Debit Amount", <column_name> : "Date"}}
+        {{<column_name>: "Narration", <column_name> : "Credit Amount", <column_name> : "Debit Amount", <column_name> : "Date"}}
 
     Columns:
     {cols}
