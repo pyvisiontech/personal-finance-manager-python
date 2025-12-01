@@ -16,6 +16,7 @@ import asyncio
 import logging
 import io
 import sys
+from datetime import datetime
 from dotenv import load_dotenv # for access .env folder
 load_dotenv()
 
@@ -437,6 +438,8 @@ async def classifier_main(file_list, name, mob_no, client_id, file_id, accountan
 
 # -------------------- NEW WEBHOOK RECEIVER ENDPOINT --------------------
 
+# -------------------- NEW WEBHOOK RECEIVER ENDPOINT --------------------
+
 @app.post("/transactions/webhook")
 async def webhook_events(request: Request):
     body = await request.body()
@@ -453,14 +456,28 @@ async def webhook_events(request: Request):
     except Exception as e:
         logger.error("Failed to parse incoming webhook JSON: %s", str(e))
         return {"status": "invalid json"}
+
     logger.info("Received %d events", len(events))
 
-         
-
     rows = []
+
+    # ---- FIXED LOOP ----
     for event in events:
         amount = event["tx_amount"]
         tx_type = "income" if amount > 0 else "expense" if amount < 0 else "transfer"
+        raw_date = event["tx_timestamp"]
+
+        # Convert date safely
+        try:
+            dt = datetime.strptime(raw_date, "%d/%m/%Y")
+        except ValueError:
+            try:
+                dt = datetime.fromisoformat(raw_date)
+            except ValueError:
+                logger.error("Bad date format in event: %s", raw_date)
+                continue  # only continue HERE inside the loop
+
+        occurred_at = dt.strftime("%Y-%m-%d")
 
         rows.append({
             "user_id": event["client_id"],
@@ -469,26 +486,23 @@ async def webhook_events(request: Request):
             "currency": "INR",
             "type": tx_type,
             "raw_description": event["tx_narration"],
-              "merchant": None, 
+            "merchant": None,
             "status": "final",
             "category_ai_id": event["category_id"],
-             "category_user_id": None,   
-            "occurred_at": event["tx_timestamp"],
+            "category_user_id": None,
+            "occurred_at": occurred_at,
         })
 
+    # After loop completes
     if not rows:
         logger.info("No rows to insert")
         return {"status": "no events"}
 
-    resp = supabase.table("transactions").insert(rows).execute() 
-
+    resp = supabase.table("transactions").insert(rows).execute()
     logger.info("Insert response: %s", resp)
-      
-    
 
     if resp.get("error"):
         logger.error("Failed to insert transactions: %s", resp["error"])
         return {"status": "error"}
 
     return {"status": "success"}
-# ----------------------------------------------------------------------------- #
