@@ -16,7 +16,7 @@ import asyncio
 import logging
 import io
 import sys
-from dotenv import load_dotenv
+from dotenv import load_dotenv # for access .env folder
 load_dotenv()
 
 
