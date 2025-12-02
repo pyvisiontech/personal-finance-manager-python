@@ -498,7 +498,7 @@ async def webhook_events(request: Request):
         logger.info("No rows to insert")
         return {"status": "no events"}
 
-    resp = supabase.table("transactions").upsert(rows, on_conflict="user_id,amount,occurred_at,raw_description").execute()
+    resp = supabase.table("transactions").insert(rows).execute()
     logger.info("Insert response: %s", resp)
 
     if resp.get("error"):
