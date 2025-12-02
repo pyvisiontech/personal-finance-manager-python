@@ -397,7 +397,7 @@ async def classifier_api(request: ClassifierRequest):
     client_info = fetch_supabase_db(request.client_id)
     # call classifier_main - async call
     await classifier_main(file_list, client_info['first_name'], client_info['phone_number'], request.client_id, request.file_id, request.accountant_id)
-    # return true or false
+   
     return {"status": "completed"}
 
 
@@ -498,7 +498,7 @@ async def webhook_events(request: Request):
         logger.info("No rows to insert")
         return {"status": "no events"}
 
-    resp = supabase.table("transactions").upsert(rows).execute()
+    resp = supabase.table("transactions").upsert(rows, on_conflict="user_id,amount,occurred_at,raw_description").execute()
     logger.info("Insert response: %s", resp)
 
     if resp.get("error"):
