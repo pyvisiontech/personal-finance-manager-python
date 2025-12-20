@@ -38,6 +38,44 @@ logging.basicConfig(
 logger = logging.getLogger("app")
 
 
+# ============================================================================
+# ✅ NEW FUNCTION: Update statement status in Supabase
+# ============================================================================
+def update_statement_status(import_id: str, status: str, error: str = None, processor_job_id: str = None):
+    """
+    Update statement_imports table status column in Supabase.
+    
+    Args:
+        import_id: UUID of the statement_imports record (from React Native app)
+        status: 'uploaded' | 'processing' | 'completed' | 'failed'
+        error: Error message if status is 'failed' (optional)
+        processor_job_id: Optional job ID from your processing queue
+    """
+    update_data = {
+        "status": status
+    }
+    
+    # Add processed_at timestamp for completed/failed statuses
+    if status in ["completed", "failed"]:
+        update_data["processed_at"] = datetime.utcnow().isoformat()
+    
+    # Add error message if status is failed
+    if status == "failed" and error:
+        update_data["error"] = error
+    
+    # Add processor job ID if provided
+    if processor_job_id:
+        update_data["processor_job_id"] = processor_job_id
+    
+    try:
+        result = supabase.table("statement_imports").update(update_data).eq("id", import_id).execute()
+        logger.info(f"✅ Updated statement {import_id} to status: {status}")
+        return result
+    except Exception as e:
+        logger.error(f"❌ Error updating statement status: {e}")
+        raise
+
+
 # -------------------- Helpers --------------------
 
 def safe_parse_json(raw):
@@ -287,7 +325,11 @@ def csv_col_identify(cols, client, model):
     return mapping
 
 
-def df_to_event_list(df, client_id, file_id, accountant_id):
+def df_to_event_list(df, client_id, accountant_id):
+    """
+    Convert DataFrame to event list for webhook.
+    Removed file_id parameter as it's no longer needed.
+    """
     # Select required columns and convert to list of dicts
     required_cols = ['Category', 'Confidence', 'Reason', 'Description', 'Amount', 'Date']
     event_list = df[required_cols].to_dict(orient='records')
@@ -297,7 +339,6 @@ def df_to_event_list(df, client_id, file_id, accountant_id):
     # Add additional info to each event object
     for event in event_list:
         event['client_id'] = client_id
-        event['file_id'] = file_id
         event['accountant_id'] = accountant_id
         if event['Category'] not in name_to_id_map:
             res = upsert_category(event['Category'])
@@ -382,63 +423,155 @@ def say_hello():
     return {"message": "Hello from the named API!"}
 
 
+# ============================================================================
+# ✅ UPDATED: ClassifierRequest - Removed file_id field
+# ============================================================================
 class ClassifierRequest(BaseModel):
+    import_id: Optional[str] = None  # ✅ import_id from statement_imports table
     client_id: str
     signed_url: str
-    file_id: str
     accountant_id: Optional[str] = None
+    # Keep backward compatibility with old fields
+    user_id: Optional[str] = None  # ✅ Also accept user_id (same as client_id)
+    file_url: Optional[str] = None  # ✅ Also accept file_url (alternative to signed_url)
 
 
 @app.post("/classifier")
 async def classifier_api(request: ClassifierRequest):
+    """
+    ✅ UPDATED: Now handles status updates throughout the processing lifecycle
+    Removed file_id from processing
+    """
+    import_id = request.import_id
+    client_id = request.client_id or request.user_id  # Support both field names
+    
+    # ✅ NEW: If import_id is provided, update status to 'processing' immediately
+    if import_id:
+        try:
+            update_statement_status(import_id, 'processing', processor_job_id=f"job_{import_id[:8]}")
+            logger.info(f"✅ Updated statement {import_id} to 'processing' status")
+        except Exception as e:
+            logger.error(f"⚠️ Failed to update status to 'processing': {e}")
+            # Continue processing even if status update fails
+    
     file_list = []
-    # download files using presigned urls
-    # for file_id, url in file_dict.items():
-    file_list.append(download_file_from_s3(request.signed_url))
-    # fetch client info from supabase db
-    client_info = fetch_supabase_db(request.client_id)
-    # call classifier_main - async call
-    await classifier_main(file_list, client_info['first_name'], client_info['phone_number'], request.client_id, request.file_id, request.accountant_id)
-   
-    return {"status": "completed"}
+    
+    # ✅ NEW: Support both signed_url and file_url
+    file_url = request.signed_url or request.file_url
+    
+    try:
+        # download files using presigned urls
+        file_list.append(download_file_from_s3(file_url))
+        
+        # fetch client info from supabase db
+        client_info = fetch_supabase_db(client_id)
+        
+        if client_info == -1:
+            error_msg = f"Client not found: {client_id}"
+            logger.error(error_msg)
+            # ✅ NEW: Update status to 'failed' if client not found
+            if import_id:
+                update_statement_status(import_id, 'failed', error=error_msg)
+            return {"status": "error", "message": error_msg}
+        
+        # call classifier_main - async call
+        await classifier_main(
+            file_list, 
+            client_info['first_name'], 
+            client_info['phone_number'], 
+            client_id, 
+            request.accountant_id,
+            import_id  # ✅ Pass import_id to classifier_main
+        )
+        
+        # ✅ NEW: Status will be updated to 'completed' or 'failed' in classifier_main
+        return {"status": "completed"}
+        
+    except Exception as e:
+        error_msg = f"Error processing statement: {str(e)}"
+        logger.error(error_msg)
+        # ✅ NEW: Update status to 'failed' on any exception
+        if import_id:
+            try:
+                update_statement_status(import_id, 'failed', error=error_msg)
+            except Exception as status_error:
+                logger.error(f"Failed to update status to 'failed': {status_error}")
+        return {"status": "error", "message": error_msg}
 
 
-async def classifier_main(file_list, name, mob_no, client_id, file_id, accountant_id):
+# ============================================================================
+# ✅ UPDATED: classifier_main - Removed file_id parameter
+# ============================================================================
+async def classifier_main(file_list, name, mob_no, client_id, accountant_id, import_id=None):
+    """
+    ✅ UPDATED: Now accepts import_id and updates status to 'completed' or 'failed'
+    Removed file_id parameter as it's no longer needed
+    """
     res_final = pd.DataFrame()
-    ## deepseek
-    client = OpenAI(
-        base_url="https://api.deepseek.com",
-        api_key=os.getenv("OPENAI_API_KEY"),  # Deepseek free chat
-    )
-    model = "deepseek-chat"
+    
+    try:
+        ## deepseek
+        client = OpenAI(
+            base_url="https://api.deepseek.com",
+            api_key=os.getenv("OPENAI_API_KEY"),  # Deepseek free chat
+        )
+        model = "deepseek-chat"
 
-    for file in file_list:
-        if "pdf" in file.headers.get("Content-Type", ""):
-            df = pdf_to_csv(file, client, model)
-            res = categorize_transactions_batch(client, df, amount_threshold=150, batch_size=50, model=model, person_name=name, mobile_numbers=mob_no)
-        else:
-            df = pd.read_csv(io.StringIO(file.content.decode('utf-8')))
-            ## columns intent
-            map = csv_col_identify(df.columns, client, model)
-            logger.info(f"columns from the csv files: {map}")
-            df = df.rename(columns=map)
-            # Step 2: Keep only columns present in mapping
-            df = df[[col for col in map.values() if col in df.columns]]
-            res = categorize_transactions_batch(client, df, amount_threshold=150, batch_size=50, model=model, person_name=name, mobile_numbers=mob_no)
+        for file in file_list:
+            try:
+                if "pdf" in file.headers.get("Content-Type", ""):
+                    df = pdf_to_csv(file, client, model)
+                    res = categorize_transactions_batch(
+                        client, df, amount_threshold=150, batch_size=50, 
+                        model=model, person_name=name, mobile_numbers=mob_no
+                    )
+                else:
+                    df = pd.read_csv(io.StringIO(file.content.decode('utf-8')))
+                    ## columns intent
+                    map = csv_col_identify(df.columns, client, model)
+                    logger.info(f"columns from the csv files: {map}")
+                    df = df.rename(columns=map)
+                    # Step 2: Keep only columns present in mapping
+                    df = df[[col for col in map.values() if col in df.columns]]
+                    res = categorize_transactions_batch(
+                        client, df, amount_threshold=150, batch_size=50, 
+                        model=model, person_name=name, mobile_numbers=mob_no
+                    )
 
-        res_final = pd.concat([res_final, res], ignore_index=True)
+                res_final = pd.concat([res_final, res], ignore_index=True)
+                
+            except Exception as file_error:
+                error_msg = f"Error processing file: {str(file_error)}"
+                logger.error(error_msg)
+                # ✅ NEW: Update status to 'failed' if file processing fails
+                if import_id:
+                    update_statement_status(import_id, 'failed', error=error_msg)
+                raise  # Re-raise to be caught by outer try-except
 
+        # convert response to webhook event type
+        # invoke webhook event
+        logger.info("LLM invocation done. Converting df to event list")
+        event_list = df_to_event_list(res_final, client_id, accountant_id)  # ✅ Removed file_id
+        invoke_webhook(event_list)
 
-    # convert response to webhook event type
-    # invoke webhook event
-    logger.info("LLM invocation done. Converting df to event list")
-    event_list = df_to_event_list(res_final, client_id, file_id, accountant_id)
-    invoke_webhook(event_list)
+        # ✅ NEW: Update status to 'completed' after successful processing
+        if import_id:
+            update_statement_status(import_id, 'completed')
+            logger.info(f"✅ Updated statement {import_id} to 'completed' status")
 
-    return res_final
+        return res_final
+        
+    except Exception as e:
+        error_msg = f"Error in classifier_main: {str(e)}"
+        logger.error(error_msg)
+        # ✅ NEW: Update status to 'failed' on any error
+        if import_id:
+            try:
+                update_statement_status(import_id, 'failed', error=error_msg)
+            except Exception as status_error:
+                logger.error(f"Failed to update status to 'failed': {status_error}")
+        raise  # Re-raise the exception
 
-
-# -------------------- NEW WEBHOOK RECEIVER ENDPOINT --------------------
 
 # -------------------- NEW WEBHOOK RECEIVER ENDPOINT --------------------
 
@@ -508,3 +641,4 @@ async def webhook_events(request: Request):
         return {"status": "error"}
 
     return {"status": "success"}
+
