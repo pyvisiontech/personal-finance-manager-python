@@ -325,7 +325,11 @@ def csv_col_identify(cols, client, model):
     return mapping
 
 
-def df_to_event_list(df, client_id, file_id, accountant_id):
+def df_to_event_list(df, client_id, accountant_id):
+    """
+    Convert DataFrame to event list for webhook.
+    Removed file_id parameter as it's no longer needed.
+    """
     # Select required columns and convert to list of dicts
     required_cols = ['Category', 'Confidence', 'Reason', 'Description', 'Amount', 'Date']
     event_list = df[required_cols].to_dict(orient='records')
@@ -335,7 +339,6 @@ def df_to_event_list(df, client_id, file_id, accountant_id):
     # Add additional info to each event object
     for event in event_list:
         event['client_id'] = client_id
-        event['file_id'] = file_id
         event['accountant_id'] = accountant_id
         if event['Category'] not in name_to_id_map:
             res = upsert_category(event['Category'])
@@ -421,23 +424,23 @@ def say_hello():
 
 
 # ============================================================================
-# ✅ CHANGED: Updated ClassifierRequest to accept import_id from React Native
+# ✅ UPDATED: ClassifierRequest - Removed file_id field
 # ============================================================================
 class ClassifierRequest(BaseModel):
-    import_id: Optional[str] = None  # ✅ NEW: import_id from statement_imports table
+    import_id: Optional[str] = None  # ✅ import_id from statement_imports table
     client_id: str
     signed_url: str
-    file_id: str
     accountant_id: Optional[str] = None
     # Keep backward compatibility with old fields
-    user_id: Optional[str] = None  # ✅ NEW: Also accept user_id (same as client_id)
-    file_url: Optional[str] = None  # ✅ NEW: Also accept file_url (alternative to signed_url)
+    user_id: Optional[str] = None  # ✅ Also accept user_id (same as client_id)
+    file_url: Optional[str] = None  # ✅ Also accept file_url (alternative to signed_url)
 
 
 @app.post("/classifier")
 async def classifier_api(request: ClassifierRequest):
     """
     ✅ UPDATED: Now handles status updates throughout the processing lifecycle
+    Removed file_id from processing
     """
     import_id = request.import_id
     client_id = request.client_id or request.user_id  # Support both field names
@@ -477,9 +480,8 @@ async def classifier_api(request: ClassifierRequest):
             client_info['first_name'], 
             client_info['phone_number'], 
             client_id, 
-            request.file_id, 
             request.accountant_id,
-            import_id  # ✅ NEW: Pass import_id to classifier_main
+            import_id  # ✅ Pass import_id to classifier_main
         )
         
         # ✅ NEW: Status will be updated to 'completed' or 'failed' in classifier_main
@@ -498,11 +500,12 @@ async def classifier_api(request: ClassifierRequest):
 
 
 # ============================================================================
-# ✅ CHANGED: Updated classifier_main to accept import_id and update status
+# ✅ UPDATED: classifier_main - Removed file_id parameter
 # ============================================================================
-async def classifier_main(file_list, name, mob_no, client_id, file_id, accountant_id, import_id=None):
+async def classifier_main(file_list, name, mob_no, client_id, accountant_id, import_id=None):
     """
     ✅ UPDATED: Now accepts import_id and updates status to 'completed' or 'failed'
+    Removed file_id parameter as it's no longer needed
     """
     res_final = pd.DataFrame()
     
@@ -548,7 +551,7 @@ async def classifier_main(file_list, name, mob_no, client_id, file_id, accountan
         # convert response to webhook event type
         # invoke webhook event
         logger.info("LLM invocation done. Converting df to event list")
-        event_list = df_to_event_list(res_final, client_id, file_id, accountant_id)
+        event_list = df_to_event_list(res_final, client_id, accountant_id)  # ✅ Removed file_id
         invoke_webhook(event_list)
 
         # ✅ NEW: Update status to 'completed' after successful processing
@@ -638,3 +641,4 @@ async def webhook_events(request: Request):
         return {"status": "error"}
 
     return {"status": "success"}
+
