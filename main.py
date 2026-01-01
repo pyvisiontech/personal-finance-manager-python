@@ -324,11 +324,11 @@ def csv_col_identify(cols, client, model):
 
 
 
-# ✅ FIXED: df_to_event_list - Now includes file_id parameter
+# ✅ UPDATED: df_to_event_list - Now includes file_id parameter for junction table
 def df_to_event_list(df, client_id, accountant_id, file_id=None):
     """
     Convert DataFrame to event list for webhook.
-    Now includes file_id to link transactions to statement file.
+    Now includes file_id to link transactions to statement file via junction table.
     """
     # Select required columns and convert to list of dicts
     required_cols = ['Category', 'Confidence', 'Reason', 'Description', 'Amount', 'Date']
@@ -341,7 +341,7 @@ def df_to_event_list(df, client_id, accountant_id, file_id=None):
     for event in event_list:
         event['client_id'] = client_id
         event['accountant_id'] = accountant_id
-        event['file_id'] = file_id  # ✅ NEW: Add file_id to link to statement file
+        event['file_id'] = file_id  # ✅ Keep file_id for junction table linking
         if event['Category'] not in name_to_id_map:
             res = upsert_category(event['Category'])
             name_to_id_map[event['Category']] = res[0]['id']
@@ -425,38 +425,38 @@ def say_hello():
     return {"message": "Hello from the named API!"}
 
 
-# ✅ UPDATED: ClassifierRequest - Removed file_id field
+# UPDATED: ClassifierRequest - Removed file_id field
 
 class ClassifierRequest(BaseModel):
-    import_id: Optional[str] = None  # ✅ import_id from statement_imports table
+    import_id: Optional[str] = None  # import_id from statement_imports table
     client_id: str
     signed_url: str
     accountant_id: Optional[str] = None
     # Keep backward compatibility with old fields
-    user_id: Optional[str] = None  # ✅ Also accept user_id (same as client_id)
-    file_url: Optional[str] = None  # ✅ Also accept file_url (alternative to signed_url)
+    user_id: Optional[str] = None  # Also accept user_id (same as client_id)
+    file_url: Optional[str] = None  # Also accept file_url (alternative to signed_url)
 
 
 @app.post("/classifier")
 async def classifier_api(request: ClassifierRequest):
     """
-    ✅ UPDATED: Now handles status updates throughout the processing lifecycle
+    UPDATED: Now handles status updates throughout the processing lifecycle
     """
     import_id = request.import_id
     client_id = request.client_id or request.user_id  # Support both field names
     
-    # ✅ NEW: If import_id is provided, update status to 'processing' immediately
+    # NEW: If import_id is provided, update status to 'processing' immediately
     if import_id:
         try:
             update_statement_status(import_id, 'processing', processor_job_id=f"job_{import_id[:8]}")
-            logger.info(f"✅ Updated statement {import_id} to 'processing' status")
+            logger.info(f"Updated statement {import_id} to 'processing' status")
         except Exception as e:
             logger.error(f"⚠️ Failed to update status to 'processing': {e}")
             # Continue processing even if status update fails
     
     file_list = []
     
-    # ✅ NEW: Support both signed_url and file_url
+    # NEW: Support both signed_url and file_url
     file_url = request.signed_url or request.file_url
     
     try:
@@ -469,7 +469,7 @@ async def classifier_api(request: ClassifierRequest):
         if client_info == -1:
             error_msg = f"Client not found: {client_id}"
             logger.error(error_msg)
-            # ✅ NEW: Update status to 'failed' if client not found
+            # NEW: Update status to 'failed' if client not found
             if import_id:
                 update_statement_status(import_id, 'failed', error=error_msg)
             return {"status": "error", "message": error_msg}
@@ -481,16 +481,16 @@ async def classifier_api(request: ClassifierRequest):
             client_info['phone_number'], 
             client_id, 
             request.accountant_id,
-            import_id  # ✅ Pass import_id to classifier_main
+            import_id  # Pass import_id to classifier_main
         )
         
-        # ✅ NEW: Status will be updated to 'completed' or 'failed' in classifier_main
+        # NEW: Status will be updated to 'completed' or 'failed' in classifier_main
         return {"status": "completed"}
         
     except Exception as e:
         error_msg = f"Error processing statement: {str(e)}"
         logger.error(error_msg)
-        # ✅ NEW: Update status to 'failed' on any exception
+        # NEW: Update status to 'failed' on any exception
         if import_id:
             try:
                 update_statement_status(import_id, 'failed', error=error_msg)
@@ -499,12 +499,12 @@ async def classifier_api(request: ClassifierRequest):
         return {"status": "error", "message": error_msg}
 
 
-# ✅ FIXED: classifier_main - Now passes file_id to df_to_event_list
+# UPDATED: classifier_main - Now passes file_id to df_to_event_list
 
 async def classifier_main(file_list, name, mob_no, client_id, accountant_id, import_id=None):
     """
-    ✅ UPDATED: Now accepts import_id and updates status to 'completed' or 'failed'
-    Note: API parameter is import_id, but internally we use file_id for clarity
+    UPDATED: Now accepts import_id and updates status to 'completed' or 'failed'
+    Note: import_id is used as file_id for junction table linking
     """
     res_final = pd.DataFrame()
     
@@ -545,7 +545,7 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
             except Exception as file_error:
                 error_msg = f"Error processing file: {str(file_error)}"
                 logger.error(error_msg)
-                # ✅ NEW: Update status to 'failed' if file processing fails
+                # NEW: Update status to 'failed' if file processing fails
                 if import_id:
                     update_statement_status(import_id, 'failed', error=error_msg)
                 raise  # Re-raise to be caught by outer try-except
@@ -556,7 +556,7 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
         event_list = df_to_event_list(res_final, client_id, accountant_id, file_id)  # ✅ Pass file_id
         invoke_webhook(event_list)
 
-        # ✅ NEW: Update status to 'completed' after successful processing
+        # NEW: Update status to 'completed' after successful processing
         if import_id:
             update_statement_status(import_id, 'completed')
             logger.info(f"✅ Updated statement {import_id} to 'completed' status")
@@ -566,7 +566,7 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
     except Exception as e:
         error_msg = f"Error in classifier_main: {str(e)}"
         logger.error(error_msg)
-        # ✅ NEW: Update status to 'failed' on any error
+        # NEW: Update status to 'failed' on any error
         if import_id:
             try:
                 update_statement_status(import_id, 'failed', error=error_msg)
@@ -575,8 +575,7 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
         raise  # Re-raise the exception
 
 
-# NEW WEBHOOK RECEIVER ENDPOINT
-# UPDATED: Webhook endpoint with GLOBAL deduplication logic
+# UPDATED: Webhook endpoint - Removed statement_import_id from transactions, uses junction table only
 @app.post("/transactions/webhook")
 async def webhook_events(request: Request):
     body = await request.body()
@@ -598,7 +597,7 @@ async def webhook_events(request: Request):
 
     rows = []
     rows_to_insert = []
-    links_to_create = []  # NEW: Track links to create in junction table
+    links_to_create = []  # Track links to create in junction table
 
     # ---- Process events ----
     for event in events:
@@ -618,6 +617,8 @@ async def webhook_events(request: Request):
 
         occurred_at = dt.strftime("%Y-%m-%d")
 
+        # UPDATED: Removed statement_import_id from transaction_data
+        # Relationships are now only tracked via statement_transactions junction table
         transaction_data = {
             "user_id": event["client_id"],
             "source": "statement",
@@ -629,11 +630,14 @@ async def webhook_events(request: Request):
             "status": "final",
             "category_ai_id": event["category_id"],
             "category_user_id": None,
-            "statement_import_id": event.get("file_id"),  # Keep for backward compatibility
+            # statement_import_id removed - relationships now only in junction table
             "occurred_at": occurred_at,
         }
         
-        rows.append(transaction_data)
+        rows.append({
+            "transaction_data": transaction_data,
+            "file_id": event.get("file_id")  # Keep file_id separate for junction table
+        })
 
     # After loop completes
     if not rows:
@@ -644,32 +648,25 @@ async def webhook_events(request: Request):
     # This prevents duplicate transactions when users upload overlapping statements
     logger.info(f"Checking for duplicates among {len(rows)} transactions (GLOBAL check across all files)")
     
-    file_id = rows[0].get("statement_import_id") if rows else None  # Get file_id from first row (all should have same file_id)
-    
-    for row in rows:
-        current_file_id = row.get("statement_import_id")
+    for row_item in rows:
+        transaction_data = row_item["transaction_data"]
+        current_file_id = row_item["file_id"]
         
-        # KEY CHANGE: Check for duplicates GLOBALLY (remove file_id filter)
+        # UPDATED: Query no longer includes statement_import_id (column doesn't exist)
         # Match by: user_id, raw_description, amount, occurred_at, source
         # This ensures the same transaction from different statement files is only stored once
-        query = supabase.table("transactions").select("id, category_ai_id, category_user_id, statement_import_id").eq("user_id", row["user_id"]).eq("raw_description", row["raw_description"]).eq("amount", row["amount"]).eq("occurred_at", row["occurred_at"]).eq("source", "statement")
+        query = supabase.table("transactions").select("id, category_ai_id, category_user_id").eq("user_id", transaction_data["user_id"]).eq("raw_description", transaction_data["raw_description"]).eq("amount", transaction_data["amount"]).eq("occurred_at", transaction_data["occurred_at"]).eq("source", "statement")
         
         existing = query.execute()
         
         if existing.data and len(existing.data) > 0:
             # Transaction already exists (from any statement file) - skip insertion
             existing_id = existing.data[0]["id"]
-            existing_file_id = existing.data[0].get("statement_import_id")
             
-            # Log whether it's from the same file or different file
-            if existing_file_id == current_file_id:
-                logger.info(f"⚠️ Duplicate transaction found from SAME file (ID: {existing_id}, file_id: {current_file_id}). Skipping insertion.")
-            else:
-                logger.info(f"⚠️ Duplicate transaction found from DIFFERENT file (ID: {existing_id}, existing_file_id: {existing_file_id}, new_file_id: {current_file_id}). Creating link in junction table.")
+            logger.info(f"Duplicate transaction found (ID: {existing_id}). Creating link in junction table if needed.")
+            logger.info(f"   Details: {transaction_data['raw_description'][:50]}... | Amount: {transaction_data['amount']} | Date: {transaction_data['occurred_at']}")
             
-            logger.info(f"   Details: {row['raw_description'][:50]}... | Amount: {row['amount']} | Date: {row['occurred_at']}")
-            
-            # NEW: Create link in junction table (even if duplicate from different file)
+            # Create link in junction table (even if duplicate from different file)
             # This ensures the statement can find all its transactions
             if current_file_id:
                 links_to_create.append({
@@ -688,25 +685,31 @@ async def webhook_events(request: Request):
                 # Only update if:
                 # 1. category_ai_id is different AND
                 # 2. category_user_id is null (user hasn't manually set a category)
-                if existing_cat_ai != row["category_ai_id"] and existing_cat_user is None:
+                if existing_cat_ai != transaction_data["category_ai_id"] and existing_cat_user is None:
                     supabase.table("transactions").update({
-                        "category_ai_id": row["category_ai_id"]
+                        "category_ai_id": transaction_data["category_ai_id"]
                     }).eq("id", existing_id).execute()
-                    logger.info(f"✅ Updated category_ai_id for existing transaction {existing_id}")
+                    logger.info(f"Updated category_ai_id for existing transaction {existing_id}")
             except Exception as update_error:
                 logger.warning(f"Could not update existing transaction: {update_error}")
         else:
             # Transaction doesn't exist globally - add to insert list
-            rows_to_insert.append(row)
+            rows_to_insert.append({
+                "transaction_data": transaction_data,
+                "file_id": current_file_id
+            })
 
-    # NEW: Insert new transactions and create links
+    # Insert new transactions and create links
     inserted_transaction_ids = []
     
     if rows_to_insert:
         logger.info(f"Inserting {len(rows_to_insert)} new transactions (skipped {len(rows) - len(rows_to_insert)} duplicates)")
         
+        # Extract just transaction_data for insert
+        transactions_to_insert = [item["transaction_data"] for item in rows_to_insert]
+        
         try:
-            resp = supabase.table("transactions").insert(rows_to_insert).execute()
+            resp = supabase.table("transactions").insert(transactions_to_insert).execute()
             logger.info(f"Successfully inserted {len(rows_to_insert)} transactions")
             
             if resp.get("error"):
@@ -718,13 +721,14 @@ async def webhook_events(request: Request):
                 inserted_transaction_ids = [tx["id"] for tx in resp.data]
                 
                 # Create links for newly inserted transactions
-                for i, row in enumerate(rows_to_insert):
-                    if row.get("statement_import_id") and i < len(inserted_transaction_ids):
+                for i, row_item in enumerate(rows_to_insert):
+                    file_id = row_item["file_id"]
+                    if file_id and i < len(inserted_transaction_ids):
                         links_to_create.append({
-                            "statement_import_id": row.get("statement_import_id"),
+                            "statement_import_id": file_id,
                             "transaction_id": inserted_transaction_ids[i]
                         })
-                        logger.info(f"Added link: statement {row.get('statement_import_id')} -> transaction {inserted_transaction_ids[i]}")
+                        logger.info(f"Added link: statement {file_id} -> transaction {inserted_transaction_ids[i]}")
             
         except Exception as insert_error:
             logger.error(f"Exception during insert: {insert_error}")
@@ -732,7 +736,7 @@ async def webhook_events(request: Request):
     else:
         logger.info("All transactions already exist. No new transactions to insert.")
 
-    # NEW: Create all links in junction table
+    # Create all links in junction table
     if links_to_create:
         logger.info(f"Creating {len(links_to_create)} links in statement_transactions junction table")
         try:
@@ -750,7 +754,7 @@ async def webhook_events(request: Request):
             
             logger.info(f"Successfully created {len(links_to_create)} links in junction table")
         except Exception as link_error:
-            logger.warning(f"⚠️ Some links could not be created: {link_error}")
+            logger.warning(f"Some links could not be created: {link_error}")
             # Don't fail the entire operation if link creation fails
             # The transactions are still inserted/updated
 
