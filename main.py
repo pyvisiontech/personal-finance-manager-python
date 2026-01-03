@@ -392,7 +392,6 @@ def invoke_webhook(event_list):
         response = requests.post(webhook_url, data=raw_json_string, headers=headers, timeout=30)
     except Exception as e:
         logger.error("Exception while invoking webhook: %s", str(e))
-        return response
 
     if response.status_code == 200:
         logger.info("Webhook success")
