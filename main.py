@@ -381,7 +381,7 @@ def invoke_webhook(event_list):
     raw_json_string = json.dumps(var_json)
 
     # Read target webhook URL from environment so you can change per-deploy
-    webhook_url = "https://statement-classifier-python-2.onrender.com/transactions/webhook"
+    webhook_url = "https://personal-finance-manager-python.onrender.com/transactions/webhook"
 
 
     signature = generate_hmac_sha256_signature(os.getenv("WEBHOOK_SIGNATURE_KEY", ""), raw_json_string)
@@ -392,7 +392,7 @@ def invoke_webhook(event_list):
         response = requests.post(webhook_url, data=raw_json_string, headers=headers, timeout=30)
     except Exception as e:
         logger.error("Exception while invoking webhook: %s", str(e))
-        return
+        return response
 
     if response.status_code == 200:
         logger.info("Webhook success")
@@ -400,6 +400,8 @@ def invoke_webhook(event_list):
     else:
         logger.error(f"Webhook invocation failed with status code {response.status_code} - Response: {response.text}")
         print(f"Webhook invocation failed: {response.status_code} - {response.text}")
+
+    return response
 
 
 # -------------------- FastAPI app & routes --------------------
@@ -554,12 +556,14 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
         # invoke webhook event
         logger.info("LLM invocation done. Converting df to event list")
         event_list = df_to_event_list(res_final, client_id, accountant_id, file_id)  # ✅ Pass file_id
-        invoke_webhook(event_list)
+        webhook_response = invoke_webhook(event_list)
 
-        # NEW: Update status to 'completed' after successful processing
+        # NEW: Update status to 'completed' or 'failed' after processing
         if import_id:
-            update_statement_status(import_id, 'completed')
-            logger.info(f"✅ Updated statement {import_id} to 'completed' status")
+            web_status = 'completed' if webhook_response.status_code == 200 else 'failed'
+            web_error = None if webhook_response.status_code == 200 else webhook_response.text
+            update_statement_status(import_id, web_status, web_error)
+            logger.info(f"✅ Updated statement {import_id} to {web_status} status with {web_error} error")
 
         return res_final
         
