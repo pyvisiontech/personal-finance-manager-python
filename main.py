@@ -330,8 +330,21 @@ def df_to_event_list(df, client_id, accountant_id, file_id=None):
     Convert DataFrame to event list for webhook.
     Now includes file_id to link transactions to statement file via junction table.
     """
-    # Select required columns and convert to list of dicts
+    # ✅ FIX: Check if DataFrame is empty or None
+    if df is None or df.empty:
+        logger.warning("DataFrame is empty or None, returning empty event list")
+        return []
+    
+    # ✅ FIX: Check if required columns exist
     required_cols = ['Category', 'Confidence', 'Reason', 'Description', 'Amount', 'Date']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    
+    if missing_cols:
+        error_msg = f"Missing required columns in DataFrame: {missing_cols}. Available columns: {list(df.columns)}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    # Select required columns and convert to list of dicts
     event_list = df[required_cols].to_dict(orient='records')
 
     cat_id_map = fetch_supabase_cat_db()
@@ -539,7 +552,11 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
                         model=model, person_name=name, mobile_numbers=mob_no
                     )
 
-                res_final = pd.concat([res_final, res], ignore_index=True)
+                # ✅ FIX: Check if res is valid before concatenating
+                if res is not None and not res.empty:
+                    res_final = pd.concat([res_final, res], ignore_index=True)
+                else:
+                    logger.warning("No transactions found after categorization (empty DataFrame)")
                 
             except Exception as file_error:
                 error_msg = f"Error processing file: {str(file_error)}"
@@ -552,19 +569,36 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
         # convert response to webhook event type
         # invoke webhook event
         logger.info("LLM invocation done. Converting df to event list")
+        
+        # ✅ FIX: Handle empty DataFrame case
+        if res_final.empty:
+            logger.warning("No transactions found in final result. Statement may have no transactions above threshold.")
+            if import_id:
+                update_statement_status(import_id, 'completed', error="No transactions found above threshold (150)")
+            return res_final
+        
         event_list = df_to_event_list(res_final, client_id, accountant_id, file_id)  # ✅ Pass file_id
-        webhook_response = invoke_webhook(event_list)
+        
+        # ✅ FIX: Only invoke webhook if we have events
+        if event_list:
+            webhook_response = invoke_webhook(event_list)
 
-      # NEW: Update status to 'completed' or 'failed' after processing
-        if import_id:
-            if webhook_response is not None and webhook_response.status_code == 200:
-                web_status = 'completed'
-                web_error = None
-            else:
-                web_status = 'failed'
-                web_error = webhook_response.text if webhook_response is not None else "Webhook call failed"
-            update_statement_status(import_id, web_status, web_error)
-            logger.info(f"✅ Updated statement {import_id} to {web_status} status")
+            # ✅ FIXED: Update status to 'completed' or 'failed' after processing
+            if import_id:
+                if webhook_response is not None and webhook_response.status_code == 200:
+                    web_status = 'completed'
+                    web_error = None
+                else:
+                    web_status = 'failed'
+                    web_error = webhook_response.text if webhook_response is not None else "Webhook call failed"
+                update_statement_status(import_id, web_status, web_error)
+                logger.info(f"✅ Updated statement {import_id} to {web_status} status")
+        else:
+            # No events to send, but processing was successful
+            logger.info("No events to send to webhook (empty event list)")
+            if import_id:
+                update_statement_status(import_id, 'completed', error="No transactions found above threshold")
+                logger.info(f"✅ Updated statement {import_id} to 'completed' status (no transactions)")
 
         return res_final
         
@@ -769,4 +803,3 @@ async def webhook_events(request: Request):
         "skipped": len(rows) - len(rows_to_insert),
         "links_created": len(links_to_create)
     }
-
