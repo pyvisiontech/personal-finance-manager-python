@@ -392,6 +392,7 @@ def invoke_webhook(event_list):
         response = requests.post(webhook_url, data=raw_json_string, headers=headers, timeout=30)
     except Exception as e:
         logger.error("Exception while invoking webhook: %s", str(e))
+        return
 
     if response.status_code == 200:
         logger.info("Webhook success")
@@ -400,7 +401,7 @@ def invoke_webhook(event_list):
         logger.error(f"Webhook invocation failed with status code {response.status_code} - Response: {response.text}")
         print(f"Webhook invocation failed: {response.status_code} - {response.text}")
 
-    return response
+
 
 
 # -------------------- FastAPI app & routes --------------------
