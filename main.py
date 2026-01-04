@@ -79,22 +79,54 @@ def update_statement_status(import_id: str, status: str, error: str = None, proc
 def safe_parse_json(raw):
     """
     Try to parse JSON, fix minor truncation issues if possible.
+    ✅ IMPROVED: Handles extra closing brackets like ]] and other malformed JSON
     """
     raw = raw.strip()
     # Remove or ``` markdown if present
-    raw = re.sub(r"^on", "", raw)
+    raw = re.sub(r"^", "", raw)
     raw = re.sub(r"```$", "", raw)
+    raw = raw.strip()
+
+    # ✅ FIX: Remove extra closing brackets at the end
+    # Handle cases like: [...]] or [...]]]
+    while raw.endswith(']') and raw.count(']') > raw.count('['):
+        raw = raw.rstrip(']').rstrip()
+    
+    # ✅ FIX: Remove extra closing braces at the end
+    # Handle cases like: [...}} or [...}}}
+    while raw.endswith('}') and raw.count('}') > raw.count('{'):
+        raw = raw.rstrip('}').rstrip()
 
     # Try normal parsing
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        # Try to fix common issues
+        # If it starts with [ but doesn't end with ], try adding ]
         if raw.startswith("[") and not raw.endswith("]"):
             raw += "]"
-        try:
-            return json.loads(raw)
-        except:
-            return None
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+        
+        # Try to extract JSON from the string if it's embedded
+        # Look for JSON array pattern
+        json_match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if json_match:
+            try:
+                extracted = json_match.group(0)
+                # Clean up extracted JSON
+                while extracted.endswith(']') and extracted.count(']') > extracted.count('['):
+                    extracted = extracted.rstrip(']').rstrip()
+                return json.loads(extracted)
+            except json.JSONDecodeError:
+                pass
+        
+        logger.error(f"Failed to parse JSON. Raw output length: {len(raw)}")
+        logger.error(f"First 500 chars: {raw[:500]}")
+        logger.error(f"Last 500 chars: {raw[-500:]}")
+        return None
 
 
 # --- Helper to chunk list ---
@@ -128,6 +160,11 @@ def categorize_transactions_batch(client, df, amount_threshold=100, batch_size=2
 
     # Filter rows for LLM
     df_to_process = df[df["Amount"].abs() >= amount_threshold].copy()
+    
+    # ✅ FIX: Check if there are any transactions to process
+    if df_to_process.empty:
+        logger.warning(f"No transactions found above threshold {amount_threshold}")
+        return pd.DataFrame()
 
     for batch in chunker(list(df_to_process.itertuples(index=False)), batch_size):
         # Prepare transactions text including Date
@@ -178,6 +215,7 @@ def categorize_transactions_batch(client, df, amount_threshold=100, batch_size=2
         Notes:
         - Reason must be 1–3 words only, explaining why the Category was chosen.
           Example: "Zepto", "salary credit Paytm", "p2p Vijay", "investment corp ACH", "investment corp Zerodha" etc.
+        - IMPORTANT: Return ONLY the JSON array, no extra brackets or closing characters.
         
         Transactions:
         {transactions_text}
@@ -202,13 +240,19 @@ def categorize_transactions_batch(client, df, amount_threshold=100, batch_size=2
         batch_results = safe_parse_json(raw_output)
         if batch_results:
             results.extend(batch_results)
-            logger.info("Success to parse JSON for the batch from main classifier")
+            logger.info(f"Successfully parsed {len(batch_results)} transactions from batch")
         else:
-            print("⚠️ Failed to parse JSON for batch. Raw output:", raw_output)
-            logger.info("Failed to parse JSON for the batch from main classifier")
+            print("⚠️ Failed to parse JSON for batch. Raw output:", raw_output[:200])
+            logger.warning("Failed to parse JSON for the batch from main classifier")
+            logger.warning(f"Raw output (first 500 chars): {raw_output[:500]}")
 
     # Convert results to DataFrame
-    results_df = pd.DataFrame(results)
+    if results:
+        results_df = pd.DataFrame(results)
+        logger.info(f"Successfully categorized {len(results_df)} transactions")
+    else:
+        logger.warning("No transactions were successfully categorized")
+        results_df = pd.DataFrame()
 
     return results_df
 
