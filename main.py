@@ -81,8 +81,8 @@ def safe_parse_json(raw):
     Try to parse JSON, fix minor truncation issues if possible.
     """
     raw = raw.strip()
-    # Remove ```json or ``` markdown if present
-    raw = re.sub(r"^```json", "", raw)
+    # Remove or ``` markdown if present
+    raw = re.sub(r"^on", "", raw)
     raw = re.sub(r"```$", "", raw)
 
     # Try normal parsing
@@ -309,8 +309,8 @@ def csv_col_identify(cols, client, model):
     # Extract text content
     raw_output = response.choices[0].message.content.strip()
 
-    # Remove markdown if present (like ```json ... ```)
-    raw_output = raw_output.replace("```json", "").replace("```", "").strip()
+    # Remove markdown if present (liken ... ```)
+    raw_output = raw_output.replace("", "").replace("```", "").strip()
 
     # Parse into dictionary safely
     try:
@@ -383,25 +383,22 @@ def invoke_webhook(event_list):
     # Read target webhook URL from environment so you can change per-deploy
     webhook_url = "https://personal-finance-manager-python.onrender.com/transactions/webhook"
 
-
     signature = generate_hmac_sha256_signature(os.getenv("WEBHOOK_SIGNATURE_KEY", ""), raw_json_string)
     headers = {"Content-Type": "application/json", "x-signature": signature}
 
     logger.info("Invoking webhook event to %s", webhook_url)
     try:
         response = requests.post(webhook_url, data=raw_json_string, headers=headers, timeout=30)
+        if response.status_code == 200:
+            logger.info("Webhook success")
+            print("Webhook successfully invoked.")
+        else:
+            logger.error(f"Webhook invocation failed with status code {response.status_code} - Response: {response.text}")
+            print(f"Webhook invocation failed: {response.status_code} - {response.text}")
+        return response  # ✅ Always return response object
     except Exception as e:
         logger.error("Exception while invoking webhook: %s", str(e))
-        return
-
-    if response.status_code == 200:
-        logger.info("Webhook success")
-        print("Webhook successfully invoked.")
-    else:
-        logger.error(f"Webhook invocation failed with status code {response.status_code} - Response: {response.text}")
-        print(f"Webhook invocation failed: {response.status_code} - {response.text}")
-
-
+        return None  # ✅ Return None on exception
 
 
 # -------------------- FastAPI app & routes --------------------
@@ -558,12 +555,16 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
         event_list = df_to_event_list(res_final, client_id, accountant_id, file_id)  # ✅ Pass file_id
         webhook_response = invoke_webhook(event_list)
 
-        # NEW: Update status to 'completed' or 'failed' after processing
+      # NEW: Update status to 'completed' or 'failed' after processing
         if import_id:
-            web_status = 'completed' if webhook_response.status_code == 200 else 'failed'
-            web_error = None if webhook_response.status_code == 200 else webhook_response.text
+            if webhook_response is not None and webhook_response.status_code == 200:
+                web_status = 'completed'
+                web_error = None
+            else:
+                web_status = 'failed'
+                web_error = webhook_response.text if webhook_response is not None else "Webhook call failed"
             update_statement_status(import_id, web_status, web_error)
-            logger.info(f"✅ Updated statement {import_id} to {web_status} status with {web_error} error")
+            logger.info(f"✅ Updated statement {import_id} to {web_status} status")
 
         return res_final
         
