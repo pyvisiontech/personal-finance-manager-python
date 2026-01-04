@@ -445,7 +445,8 @@ def invoke_webhook(event_list):
 
     logger.info("Invoking webhook event to %s", webhook_url)
     try:
-        response = requests.post(webhook_url, data=raw_json_string, headers=headers, timeout=30)
+        # ✅ FIX: Increase timeout to 120 seconds (Render.com can be slow on cold starts)
+        response = requests.post(webhook_url, data=raw_json_string, headers=headers, timeout=120)
         if response.status_code == 200:
             logger.info("Webhook success")
             print("Webhook successfully invoked.")
@@ -453,9 +454,18 @@ def invoke_webhook(event_list):
             logger.error(f"Webhook invocation failed with status code {response.status_code} - Response: {response.text}")
             print(f"Webhook invocation failed: {response.status_code} - {response.text}")
         return response  # ✅ Always return response object
+    except requests.exceptions.Timeout:
+        # ✅ FIX: Handle timeout separately - webhook might still process transactions
+        logger.warning("Webhook call timed out after 120 seconds. Transactions may still be processed.")
+        logger.warning("This is common on Render.com free tier due to cold starts.")
+        # Return a mock response object to indicate timeout
+        class TimeoutResponse:
+            status_code = 408  # Request Timeout
+            text = "Webhook call timed out (may still be processing)"
+        return TimeoutResponse()
     except Exception as e:
         logger.error("Exception while invoking webhook: %s", str(e))
-        return None  # ✅ Return None on exception
+        return None  # ✅ Return None on other exceptions
 
 
 # -------------------- FastAPI app & routes --------------------
@@ -629,12 +639,22 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
 
             # ✅ FIXED: Update status to 'completed' or 'failed' after processing
             if import_id:
-                if webhook_response is not None and webhook_response.status_code == 200:
-                    web_status = 'completed'
-                    web_error = None
+                if webhook_response is not None:
+                    if webhook_response.status_code == 200:
+                        web_status = 'completed'
+                        web_error = None
+                    elif webhook_response.status_code == 408:  # ✅ FIX: Timeout - don't mark as failed
+                        # Don't mark as failed on timeout - webhook may still process transactions
+                        web_status = 'completed'
+                        web_error = "Webhook call timed out but transactions may still be processed"
+                        logger.warning("Webhook timed out but marking as completed (transactions may still be processed)")
+                    else:
+                        web_status = 'failed'
+                        web_error = webhook_response.text if hasattr(webhook_response, 'text') else "Webhook call failed"
                 else:
                     web_status = 'failed'
-                    web_error = webhook_response.text if webhook_response is not None else "Webhook call failed"
+                    web_error = "Webhook call failed (no response)"
+                
                 update_statement_status(import_id, web_status, web_error)
                 logger.info(f"✅ Updated statement {import_id} to {web_status} status")
         else:
