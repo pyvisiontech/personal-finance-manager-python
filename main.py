@@ -79,22 +79,54 @@ def update_statement_status(import_id: str, status: str, error: str = None, proc
 def safe_parse_json(raw):
     """
     Try to parse JSON, fix minor truncation issues if possible.
+    ✅ IMPROVED: Handles extra closing brackets like ]] and other malformed JSON
     """
     raw = raw.strip()
-    # Remove ```json or ``` markdown if present
-    raw = re.sub(r"^```json", "", raw)
+    # Remove or ``` markdown if present
+    raw = re.sub(r"^", "", raw)
     raw = re.sub(r"```$", "", raw)
+    raw = raw.strip()
+
+    # ✅ FIX: Remove extra closing brackets at the end
+    # Handle cases like: [...]] or [...]]]
+    while raw.endswith(']') and raw.count(']') > raw.count('['):
+        raw = raw.rstrip(']').rstrip()
+    
+    # ✅ FIX: Remove extra closing braces at the end
+    # Handle cases like: [...}} or [...}}}
+    while raw.endswith('}') and raw.count('}') > raw.count('{'):
+        raw = raw.rstrip('}').rstrip()
 
     # Try normal parsing
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
+        # Try to fix common issues
+        # If it starts with [ but doesn't end with ], try adding ]
         if raw.startswith("[") and not raw.endswith("]"):
             raw += "]"
-        try:
-            return json.loads(raw)
-        except:
-            return None
+            try:
+                return json.loads(raw)
+            except json.JSONDecodeError:
+                pass
+        
+        # Try to extract JSON from the string if it's embedded
+        # Look for JSON array pattern
+        json_match = re.search(r'\[.*\]', raw, re.DOTALL)
+        if json_match:
+            try:
+                extracted = json_match.group(0)
+                # Clean up extracted JSON
+                while extracted.endswith(']') and extracted.count(']') > extracted.count('['):
+                    extracted = extracted.rstrip(']').rstrip()
+                return json.loads(extracted)
+            except json.JSONDecodeError:
+                pass
+        
+        logger.error(f"Failed to parse JSON. Raw output length: {len(raw)}")
+        logger.error(f"First 500 chars: {raw[:500]}")
+        logger.error(f"Last 500 chars: {raw[-500:]}")
+        return None
 
 
 # --- Helper to chunk list ---
@@ -128,6 +160,11 @@ def categorize_transactions_batch(client, df, amount_threshold=100, batch_size=2
 
     # Filter rows for LLM
     df_to_process = df[df["Amount"].abs() >= amount_threshold].copy()
+    
+    # ✅ FIX: Check if there are any transactions to process
+    if df_to_process.empty:
+        logger.warning(f"No transactions found above threshold {amount_threshold}")
+        return pd.DataFrame()
 
     for batch in chunker(list(df_to_process.itertuples(index=False)), batch_size):
         # Prepare transactions text including Date
@@ -178,6 +215,7 @@ def categorize_transactions_batch(client, df, amount_threshold=100, batch_size=2
         Notes:
         - Reason must be 1–3 words only, explaining why the Category was chosen.
           Example: "Zepto", "salary credit Paytm", "p2p Vijay", "investment corp ACH", "investment corp Zerodha" etc.
+        - IMPORTANT: Return ONLY the JSON array, no extra brackets or closing characters.
         
         Transactions:
         {transactions_text}
@@ -202,13 +240,19 @@ def categorize_transactions_batch(client, df, amount_threshold=100, batch_size=2
         batch_results = safe_parse_json(raw_output)
         if batch_results:
             results.extend(batch_results)
-            logger.info("Success to parse JSON for the batch from main classifier")
+            logger.info(f"Successfully parsed {len(batch_results)} transactions from batch")
         else:
-            print("⚠️ Failed to parse JSON for batch. Raw output:", raw_output)
-            logger.info("Failed to parse JSON for the batch from main classifier")
+            print("⚠️ Failed to parse JSON for batch. Raw output:", raw_output[:200])
+            logger.warning("Failed to parse JSON for the batch from main classifier")
+            logger.warning(f"Raw output (first 500 chars): {raw_output[:500]}")
 
     # Convert results to DataFrame
-    results_df = pd.DataFrame(results)
+    if results:
+        results_df = pd.DataFrame(results)
+        logger.info(f"Successfully categorized {len(results_df)} transactions")
+    else:
+        logger.warning("No transactions were successfully categorized")
+        results_df = pd.DataFrame()
 
     return results_df
 
@@ -309,8 +353,8 @@ def csv_col_identify(cols, client, model):
     # Extract text content
     raw_output = response.choices[0].message.content.strip()
 
-    # Remove markdown if present (like ```json ... ```)
-    raw_output = raw_output.replace("```json", "").replace("```", "").strip()
+    # Remove markdown if present (liken ... ```)
+    raw_output = raw_output.replace("", "").replace("```", "").strip()
 
     # Parse into dictionary safely
     try:
@@ -330,8 +374,21 @@ def df_to_event_list(df, client_id, accountant_id, file_id=None):
     Convert DataFrame to event list for webhook.
     Now includes file_id to link transactions to statement file via junction table.
     """
-    # Select required columns and convert to list of dicts
+    # ✅ FIX: Check if DataFrame is empty or None
+    if df is None or df.empty:
+        logger.warning("DataFrame is empty or None, returning empty event list")
+        return []
+    
+    # ✅ FIX: Check if required columns exist
     required_cols = ['Category', 'Confidence', 'Reason', 'Description', 'Amount', 'Date']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    
+    if missing_cols:
+        error_msg = f"Missing required columns in DataFrame: {missing_cols}. Available columns: {list(df.columns)}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
+    
+    # Select required columns and convert to list of dicts
     event_list = df[required_cols].to_dict(orient='records')
 
     cat_id_map = fetch_supabase_cat_db()
@@ -383,24 +440,32 @@ def invoke_webhook(event_list):
     # Read target webhook URL from environment so you can change per-deploy
     webhook_url = "https://personal-finance-manager-python.onrender.com/transactions/webhook"
 
-
     signature = generate_hmac_sha256_signature(os.getenv("WEBHOOK_SIGNATURE_KEY", ""), raw_json_string)
     headers = {"Content-Type": "application/json", "x-signature": signature}
 
     logger.info("Invoking webhook event to %s", webhook_url)
     try:
-        response = requests.post(webhook_url, data=raw_json_string, headers=headers, timeout=30)
+        # ✅ FIX: Increase timeout to 120 seconds (Render.com can be slow on cold starts)
+        response = requests.post(webhook_url, data=raw_json_string, headers=headers, timeout=120)
+        if response.status_code == 200:
+            logger.info("Webhook success")
+            print("Webhook successfully invoked.")
+        else:
+            logger.error(f"Webhook invocation failed with status code {response.status_code} - Response: {response.text}")
+            print(f"Webhook invocation failed: {response.status_code} - {response.text}")
+        return response  # ✅ Always return response object
+    except requests.exceptions.Timeout:
+        # ✅ FIX: Handle timeout separately - webhook might still process transactions
+        logger.warning("Webhook call timed out after 120 seconds. Transactions may still be processed.")
+        logger.warning("This is common on Render.com free tier due to cold starts.")
+        # Return a mock response object to indicate timeout
+        class TimeoutResponse:
+            status_code = 408  # Request Timeout
+            text = "Webhook call timed out (may still be processing)"
+        return TimeoutResponse()
     except Exception as e:
         logger.error("Exception while invoking webhook: %s", str(e))
-
-    if response.status_code == 200:
-        logger.info("Webhook success")
-        print("Webhook successfully invoked.")
-    else:
-        logger.error(f"Webhook invocation failed with status code {response.status_code} - Response: {response.text}")
-        print(f"Webhook invocation failed: {response.status_code} - {response.text}")
-
-    return response
+        return None  # ✅ Return None on other exceptions
 
 
 # -------------------- FastAPI app & routes --------------------
@@ -541,7 +606,11 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
                         model=model, person_name=name, mobile_numbers=mob_no
                     )
 
-                res_final = pd.concat([res_final, res], ignore_index=True)
+                # ✅ FIX: Check if res is valid before concatenating
+                if res is not None and not res.empty:
+                    res_final = pd.concat([res_final, res], ignore_index=True)
+                else:
+                    logger.warning("No transactions found after categorization (empty DataFrame)")
                 
             except Exception as file_error:
                 error_msg = f"Error processing file: {str(file_error)}"
@@ -554,15 +623,46 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
         # convert response to webhook event type
         # invoke webhook event
         logger.info("LLM invocation done. Converting df to event list")
+        
+        # ✅ FIX: Handle empty DataFrame case
+        if res_final.empty:
+            logger.warning("No transactions found in final result. Statement may have no transactions above threshold.")
+            if import_id:
+                update_statement_status(import_id, 'completed', error="No transactions found above threshold (150)")
+            return res_final
+        
         event_list = df_to_event_list(res_final, client_id, accountant_id, file_id)  # ✅ Pass file_id
-        webhook_response = invoke_webhook(event_list)
+        
+        # ✅ FIX: Only invoke webhook if we have events
+        if event_list:
+            webhook_response = invoke_webhook(event_list)
 
-        # NEW: Update status to 'completed' or 'failed' after processing
-        if import_id:
-            web_status = 'completed' if webhook_response.status_code == 200 else 'failed'
-            web_error = None if webhook_response.status_code == 200 else webhook_response.text
-            update_statement_status(import_id, web_status, web_error)
-            logger.info(f"✅ Updated statement {import_id} to {web_status} status with {web_error} error")
+            # ✅ FIXED: Update status to 'completed' or 'failed' after processing
+            if import_id:
+                if webhook_response is not None:
+                    if webhook_response.status_code == 200:
+                        web_status = 'completed'
+                        web_error = None
+                    elif webhook_response.status_code == 408:  # ✅ FIX: Timeout - don't mark as failed
+                        # Don't mark as failed on timeout - webhook may still process transactions
+                        web_status = 'completed'
+                        web_error = "Webhook call timed out but transactions may still be processed"
+                        logger.warning("Webhook timed out but marking as completed (transactions may still be processed)")
+                    else:
+                        web_status = 'failed'
+                        web_error = webhook_response.text if hasattr(webhook_response, 'text') else "Webhook call failed"
+                else:
+                    web_status = 'failed'
+                    web_error = "Webhook call failed (no response)"
+                
+                update_statement_status(import_id, web_status, web_error)
+                logger.info(f"✅ Updated statement {import_id} to {web_status} status")
+        else:
+            # No events to send, but processing was successful
+            logger.info("No events to send to webhook (empty event list)")
+            if import_id:
+                update_statement_status(import_id, 'completed', error="No transactions found above threshold")
+                logger.info(f"✅ Updated statement {import_id} to 'completed' status (no transactions)")
 
         return res_final
         
