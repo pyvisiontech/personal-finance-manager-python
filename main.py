@@ -579,6 +579,7 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
 
 
 # UPDATED: Webhook endpoint - Removed statement_import_id from transactions, uses junction table only
+# ✅ FIXED: Do not use resp.get("error") - APIResponse has .data only; use resp.data for inserted IDs
 @app.post("/transactions/webhook")
 async def webhook_events(request: Request):
     body = await request.body()
@@ -714,24 +715,23 @@ async def webhook_events(request: Request):
         try:
             resp = supabase.table("transactions").insert(transactions_to_insert).execute()
             logger.info(f"Successfully inserted {len(rows_to_insert)} transactions")
-            
-            if resp.get("error"):
-                logger.error("Failed to insert transactions: %s", resp["error"])
-                return {"status": "error", "message": str(resp["error"])}
-            
-            # Extract IDs of newly inserted transactions
+
+            # ✅ FIXED: Do NOT use resp.get("error") - Supabase returns APIResponse with .data, not a dict.
+            # Errors are raised as exceptions; we only need resp.data for inserted row IDs.
             if resp.data:
                 inserted_transaction_ids = [tx["id"] for tx in resp.data]
-                
-                # Create links for newly inserted transactions
-                for i, row_item in enumerate(rows_to_insert):
-                    file_id = row_item["file_id"]
-                    if file_id and i < len(inserted_transaction_ids):
-                        links_to_create.append({
-                            "statement_import_id": file_id,
-                            "transaction_id": inserted_transaction_ids[i]
-                        })
-                        logger.info(f"Added link: statement {file_id} -> transaction {inserted_transaction_ids[i]}")
+            else:
+                inserted_transaction_ids = []
+
+            # Create links for newly inserted transactions
+            for i, row_item in enumerate(rows_to_insert):
+                file_id = row_item["file_id"]
+                if file_id and i < len(inserted_transaction_ids):
+                    links_to_create.append({
+                        "statement_import_id": file_id,
+                        "transaction_id": inserted_transaction_ids[i]
+                    })
+                    logger.info(f"Added link: statement {file_id} -> transaction {inserted_transaction_ids[i]}")
             
         except Exception as insert_error:
             logger.error(f"Exception during insert: {insert_error}")
@@ -767,4 +767,3 @@ async def webhook_events(request: Request):
         "skipped": len(rows) - len(rows_to_insert),
         "links_created": len(links_to_create)
     }
-
