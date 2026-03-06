@@ -710,12 +710,18 @@ async def webhook_events(request: Request):
         raw_date = event["tx_timestamp"]
 
         # Convert date safely
-        try:
-            dt = datetime.strptime(raw_date, "%d/%m/%Y")
-        except ValueError:
+        dt = None
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
             try:
+                dt = datetime.strptime(raw_date, fmt)
+                break
+            except (TypeError, ValueError):
+                continue
+        if dt is None:
+            try:
+                # Handles ISO formats like 2026-02-03T00:00:00
                 dt = datetime.fromisoformat(raw_date)
-            except ValueError:
+            except (TypeError, ValueError):
                 logger.error("Bad date format in event: %s", raw_date)
                 continue  # only continue HERE inside the loop
 
