@@ -1,5 +1,7 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends, HTTPException, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+import jwt
 import pandas as pd
 from openai import OpenAI
 import tiktoken
@@ -36,6 +38,22 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("app")
+
+security = HTTPBearer()
+
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
+    token = credentials.credentials
+    try:
+        payload = jwt.decode(
+            token,
+            os.getenv("SUPABASE_JWT_SECRET"),
+            algorithms=["HS256"],
+            audience="authenticated",
+        )
+        return payload["sub"]
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
 
 
 # ✅ NEW FUNCTION: Update statement status in Supabase
@@ -504,12 +522,13 @@ class ClassifierRequest(BaseModel):
 
 
 @app.post("/classifier")
-async def classifier_api(request: ClassifierRequest):
+async def classifier_api(request: ClassifierRequest, user_id: str = Depends(verify_token)):
     """
-    UPDATED: Now handles status updates throughout the processing lifecycle
+    UPDATED: Now handles status updates throughout the processing lifecycle.
+    user_id comes from verified JWT; we do not trust client_id from request body.
     """
     import_id = request.import_id
-    client_id = request.client_id or request.user_id  # Support both field names
+    client_id = user_id  # Use cryptographically verified user_id from token
     
     # NEW: If import_id is provided, update status to 'processing' immediately
     if import_id:
