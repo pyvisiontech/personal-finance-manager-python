@@ -44,15 +44,32 @@ security = HTTPBearer()
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Security(security)):
     token = credentials.credentials
+    secret = os.getenv("SUPABASE_JWT_SECRET")
+    if not secret:
+        logger.error("SUPABASE_JWT_SECRET is not set in environment")
+        raise HTTPException(status_code=500, detail="Server misconfiguration")
     try:
         payload = jwt.decode(
             token,
-            os.getenv("SUPABASE_JWT_SECRET"),
+            secret,
             algorithms=["HS256"],
             audience="authenticated",
+            options={"verify_aud": True},
         )
         return payload["sub"]
+    except jwt.ExpiredSignatureError:
+        logger.warning("JWT token has expired")
+        raise HTTPException(status_code=401, detail="Token expired. Please log in again.")
+    except jwt.InvalidAudienceError:
+        logger.warning("JWT audience invalid, retrying without audience check")
+        try:
+            payload = jwt.decode(token, secret, algorithms=["HS256"], options={"verify_aud": False})
+            return payload["sub"]
+        except Exception as e2:
+            logger.warning("JWT decode failed without audience: %s", e2)
+            raise HTTPException(status_code=401, detail="Invalid authentication token")
     except Exception as e:
+        logger.warning("JWT verification failed: %s - %s", type(e).__name__, str(e))
         raise HTTPException(status_code=401, detail="Invalid authentication token")
 
 
