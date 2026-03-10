@@ -26,6 +26,7 @@ load_dotenv()
 
 
 from supabase import create_client  # add this import
+from cryptography.fernet import Fernet
 
 SUPABASE_URL = "https://tmpsadthcxvqtdbtslgq.supabase.co"
 SUPABASE_KEY = os.getenv("SUPABASE_PRIVATE_KEY")
@@ -38,6 +39,34 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("app")
+
+# Field-level encryption for raw_description (at rest)
+FERNET_KEY = os.getenv("FERNET_SECRET_KEY")
+if FERNET_KEY:
+    try:
+        cipher_suite = Fernet(FERNET_KEY.encode())
+    except Exception as e:
+        logger.warning("FERNET_SECRET_KEY invalid: %s. Falling back to plain text.", e)
+        cipher_suite = None
+else:
+    logger.warning("FERNET_SECRET_KEY not set. Falling back to plain text.")
+    cipher_suite = None
+
+
+def encrypt_string(text: str) -> str:
+    if not text or not cipher_suite:
+        return text or ""
+    return cipher_suite.encrypt((text or "").encode("utf-8")).decode("utf-8")
+
+
+def decrypt_string(encrypted_text: str) -> str:
+    if not encrypted_text or not cipher_suite:
+        return encrypted_text or ""
+    try:
+        return cipher_suite.decrypt(encrypted_text.encode("utf-8")).decode("utf-8")
+    except Exception:
+        return encrypted_text  # Fallback if not encrypted (e.g. legacy rows)
+
 
 security = HTTPBearer()
 
@@ -735,6 +764,74 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
         raise  # Re-raise the exception
 
 
+# GET /transactions — returns decrypted raw_description (Option 1: server-side decryption for clients)
+@app.get("/transactions")
+async def get_transactions(
+    user_id: str = Depends(verify_token),
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    category_id: Optional[str] = None,
+    group_id: Optional[str] = None,
+    statement_id: Optional[str] = None,
+    limit: Optional[int] = None,
+):
+    """
+    Fetch transactions for the authenticated user (or group), with raw_description decrypted.
+    Query params: start_date, end_date, category_id, group_id, statement_id, limit.
+    """
+    select_cols = "id, user_id, source, amount, currency, type, raw_description, raw_description_hash, merchant, status, category_ai_id, category_user_id, occurred_at, created_at, category_user:category_user_id(id, name, icon), category_ai:category_ai_id(id, name, icon)"
+    user_ids = [user_id]
+
+    if statement_id:
+        # Verify statement belongs to user and get linked transaction IDs
+        st = supabase.table("statement_imports").select("id, user_id").eq("id", statement_id).execute()
+        if not st.data or st.data[0].get("user_id") != user_id:
+            raise HTTPException(status_code=404, detail="Statement not found")
+        junc = supabase.table("statement_transactions").select("transaction_id").eq("statement_import_id", statement_id).execute()
+        tx_ids = [r["transaction_id"] for r in (junc.data or [])]
+        if not tx_ids:
+            return []
+        q = supabase.table("transactions").select(select_cols).in_("id", tx_ids)
+        if start_date:
+            q = q.gte("occurred_at", start_date)
+        if end_date:
+            q = q.lte("occurred_at", end_date)
+        if category_id:
+            q = q.eq("category_user_id", category_id)
+        if limit is not None and limit > 0:
+            q = q.limit(limit)
+        resp = q.order("occurred_at", desc=True).execute()
+    else:
+        q = supabase.table("transactions").select(select_cols)
+        if group_id:
+            members = supabase.table("group_members").select("user_id").eq("group_id", group_id).execute()
+            if not members.data:
+                return []
+            user_ids = [m["user_id"] for m in members.data]
+            q = q.in_("user_id", user_ids)
+        else:
+            q = q.eq("user_id", user_id)
+        if start_date:
+            q = q.gte("occurred_at", start_date)
+        if end_date:
+            q = q.lte("occurred_at", end_date)
+        if category_id:
+            q = q.eq("category_user_id", category_id)
+        if limit is not None and limit > 0:
+            q = q.limit(limit)
+        resp = q.order("occurred_at", desc=True).execute()
+
+    rows = resp.data or []
+    if limit is not None and limit > 0 and len(rows) > limit:
+        rows = rows[:limit]
+
+    # Decrypt raw_description for each row (legacy plaintext rows pass through decrypt_string)
+    for r in rows:
+        if r.get("raw_description"):
+            r["raw_description"] = decrypt_string(r["raw_description"])
+    return rows
+
+
 # UPDATED: Webhook endpoint - Removed statement_import_id from transactions, uses junction table only
 # ✅ FIXED: Do not use resp.get("error") - APIResponse has .data only; use resp.data for inserted IDs
 @app.post("/transactions/webhook")
@@ -784,6 +881,10 @@ async def webhook_events(request: Request):
 
         occurred_at = dt.strftime("%Y-%m-%d")
 
+        # Encrypt sensitive narrative and compute hash for fast deduplication (no decrypt at insert)
+        tx_narration = (event.get("tx_narration") or "").strip()
+        narration_hash = hashlib.sha256(tx_narration.encode("utf-8")).hexdigest()
+
         # UPDATED: Removed statement_import_id from transaction_data
         # Relationships are now only tracked via statement_transactions junction table
         transaction_data = {
@@ -792,7 +893,8 @@ async def webhook_events(request: Request):
             "amount": amount,
             "currency": "INR",
             "type": tx_type,
-            "raw_description": event["tx_narration"],
+            "raw_description": encrypt_string(tx_narration),
+            "raw_description_hash": narration_hash,
             "merchant": None,
             "status": "final",
             "category_ai_id": event["category_id"],
@@ -803,7 +905,8 @@ async def webhook_events(request: Request):
         
         rows.append({
             "transaction_data": transaction_data,
-            "file_id": event.get("file_id")  # Keep file_id separate for junction table
+            "file_id": event.get("file_id"),  # Keep file_id separate for junction table
+            "plain_narration": tx_narration,   # For legacy dedupe check only (not stored)
         })
 
     # After loop completes
@@ -818,20 +921,38 @@ async def webhook_events(request: Request):
     for row_item in rows:
         transaction_data = row_item["transaction_data"]
         current_file_id = row_item["file_id"]
-        
-        # UPDATED: Query no longer includes statement_import_id (column doesn't exist)
-        # Match by: user_id, raw_description, amount, occurred_at, source
-        # This ensures the same transaction from different statement files is only stored once
-        query = supabase.table("transactions").select("id, category_ai_id, category_user_id").eq("user_id", transaction_data["user_id"]).eq("raw_description", transaction_data["raw_description"]).eq("amount", transaction_data["amount"]).eq("occurred_at", transaction_data["occurred_at"]).eq("source", "statement")
-        
-        existing = query.execute()
-        
+        plain_narration = row_item.get("plain_narration") or ""
+
+        # Dedupe by hash first (fast; no decryption). Fallback to raw_description for legacy rows.
+        query_by_hash = (
+            supabase.table("transactions")
+            .select("id, category_ai_id, category_user_id")
+            .eq("user_id", transaction_data["user_id"])
+            .eq("raw_description_hash", transaction_data["raw_description_hash"])
+            .eq("amount", transaction_data["amount"])
+            .eq("occurred_at", transaction_data["occurred_at"])
+            .eq("source", "statement")
+        )
+        existing = query_by_hash.execute()
+
+        if (not existing.data or len(existing.data) == 0) and plain_narration:
+            # Legacy: rows inserted before hash existed have no raw_description_hash; match by plaintext
+            query_legacy = (
+                supabase.table("transactions")
+                .select("id, category_ai_id, category_user_id")
+                .eq("user_id", transaction_data["user_id"])
+                .eq("raw_description", plain_narration)
+                .eq("amount", transaction_data["amount"])
+                .eq("occurred_at", transaction_data["occurred_at"])
+                .eq("source", "statement")
+            )
+            existing = query_legacy.execute()
+
         if existing.data and len(existing.data) > 0:
             # Transaction already exists (from any statement file) - skip insertion
             existing_id = existing.data[0]["id"]
-            
             logger.info(f"Duplicate transaction found (ID: {existing_id}). Creating link in junction table if needed.")
-            logger.info(f"   Details: {transaction_data['raw_description'][:50]}... | Amount: {transaction_data['amount']} | Date: {transaction_data['occurred_at']}")
+            logger.info(f"   Hash: {transaction_data['raw_description_hash'][:16]}... | Amount: {transaction_data['amount']} | Date: {transaction_data['occurred_at']}")
             
             # Create link in junction table (even if duplicate from different file)
             # This ensures the statement can find all its transactions
