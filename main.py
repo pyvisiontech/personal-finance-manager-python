@@ -164,6 +164,24 @@ def safe_parse_json(raw):
         return None
 
 
+# PII redaction before sending text to LLM
+def redact_pii(text: str) -> str:
+    # 1. Redact Indian PAN Card Numbers (e.g. ABCDE1234F)
+    text = re.sub(r'[A-Z]{5}[0-9]{4}[A-Z]{1}', '[PAN_REDACTED]', text)
+    
+    # 2. Redact Account Numbers (typically 9 to 18 contiguous digits)
+    # We use lookarounds to avoid redacting legitimate small amounts or dates
+    text = re.sub(r'\b\d{9,18}\b', '[ACCOUNT_REDACTED]', text)
+    
+    # 3. Redact common Indian Phone Numbers (10 digits starting with 6-9, optionally with +91)
+    text = re.sub(r'(?:(?:\+|0{0,2})91(\s*[\-]\s*)?|[0]?)?[6789]\d{9}', '[PHONE_REDACTED]', text)
+
+    # 4. Redact Aadhar Numbers (12 digits separated by spaces or continuous)
+    text = re.sub(r'\b\d{4}\s?\d{4}\s?\d{4}\b', '[AADHAR_REDACTED]', text)
+    
+    return text
+
+
 # --- Helper to chunk list ---
 def chunker(seq, size):
     for pos in range(0, len(seq), size):
@@ -316,6 +334,9 @@ def pdf_to_csv(file_response, client, model):
     pdf_bytes = file_response.content
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     extracted_text = extract_text(doc)
+    
+    # NEW STEP: Scrub PII
+    safe_text = redact_pii(extracted_text)
 
     # Construct the prompt
     prompt = f"""
@@ -330,7 +351,7 @@ def pdf_to_csv(file_response, client, model):
         - Leave fields blank if data not available, but keep all four columns.
 
         Here is the extracted text:
-        {extracted_text}
+        {safe_text}
     """
     prompt_length = count_tokens(prompt, model="gpt-4o-mini")
     print("🔹 Prompt token length:", prompt_length)
