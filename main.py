@@ -593,11 +593,28 @@ async def classifier_api(request: ClassifierRequest, user_id: str = Depends(veri
     """
     UPDATED: Now handles status updates throughout the processing lifecycle.
     user_id comes from verified JWT; we do not trust client_id from request body.
+    Idempotent: if statement is already 'completed' or 'processing', skip to prevent double processing.
     """
     import_id = request.import_id
     client_id = user_id  # Use cryptographically verified user_id from token
     
-    # NEW: If import_id is provided, update status to 'processing' immediately
+    # Idempotency: skip if this statement is already completed or currently processing
+    if import_id:
+        try:
+            r = supabase.table("statement_imports").select("status").eq("id", import_id).execute()
+            if r.data and len(r.data) > 0:
+                current_status = (r.data[0].get("status") or "").strip().lower()
+                if current_status == "completed":
+                    logger.info(f"Statement {import_id} already completed; skipping duplicate request")
+                    return {"status": "completed"}
+                if current_status == "processing":
+                    logger.info(f"Statement {import_id} already processing; skipping duplicate request")
+                    return {"status": "completed"}
+        except Exception as e:
+            logger.warning(f"Could not check statement status for idempotency: {e}")
+            # Proceed with processing if we can't read status
+    
+    # If import_id is provided, update status to 'processing' immediately
     if import_id:
         try:
             update_statement_status(import_id, 'processing', processor_job_id=f"job_{import_id[:8]}")
