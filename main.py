@@ -717,6 +717,13 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
                 update_statement_status(import_id, 'completed', error="No transactions found above threshold (150)")
             return res_final
         
+        # Deduplicate by transaction identity so duplicate rows from PDF/LLM don't create duplicate events
+        cols = [c for c in ['Description', 'Amount', 'Date'] if c in res_final.columns]
+        if cols:
+            before = len(res_final)
+            res_final = res_final.drop_duplicates(subset=cols, keep='first')
+            if len(res_final) < before:
+                logger.info(f"Dropped {before - len(res_final)} duplicate rows from DataFrame before webhook")
         event_list = df_to_event_list(res_final, client_id, accountant_id, file_id)  # ✅ Pass file_id
         
         # ✅ FIX: Only invoke webhook if we have events
@@ -918,10 +925,19 @@ async def webhook_events(request: Request):
     # This prevents duplicate transactions when users upload overlapping statements
     logger.info(f"Checking for duplicates among {len(rows)} transactions (GLOBAL check across all files)")
     
+    # Within-request dedupe: same payload can have duplicate events; only insert one per (hash, amount, date)
+    seen_in_batch = set()
+    
     for row_item in rows:
         transaction_data = row_item["transaction_data"]
         current_file_id = row_item["file_id"]
         plain_narration = row_item.get("plain_narration") or ""
+
+        batch_key = (transaction_data["raw_description_hash"], transaction_data["amount"], transaction_data["occurred_at"])
+        if batch_key in seen_in_batch:
+            logger.debug(f"Skipping duplicate event in same request: amount={transaction_data['amount']} date={transaction_data['occurred_at']}")
+            continue
+        seen_in_batch.add(batch_key)
 
         # Dedupe by hash first (fast; no decryption). Fallback to raw_description for legacy rows.
         query_by_hash = (
