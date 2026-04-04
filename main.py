@@ -378,6 +378,7 @@ def pdf_to_csv(file_response, client, model):
         - The FIRST LINE must be the header: Date,Narration,Debit Amount,Credit Amount
         - Each row should ONLY be: Date,Narration,Debit Amount,Credit Amount
         - Leave fields blank if data not available, but keep all four columns.
+        - CRITICAL RULE: Pay extreme attention to whether the amount falls under the 'Withdrawal Amount' or 'Deposit Amount' column in the original text. You MUST STRICTLY map 'Withdrawal' to the 'Debit Amount' column, and 'Deposit' or 'Credit' to the 'Credit Amount' column. Do not guess.
 
         Here is the extracted text:
         {safe_text}
