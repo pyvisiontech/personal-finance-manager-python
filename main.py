@@ -298,6 +298,7 @@ def categorize_transactions_batch(client, df, amount_threshold=100, batch_size=2
         - Reason must be 1–3 words only, explaining why the Category was chosen.
           Example: "Zepto", "salary credit Paytm", "p2p Vijay", "investment corp ACH", "investment corp Zerodha" etc.
         - IMPORTANT: Return ONLY the JSON array, no extra brackets or closing characters.
+        - CRITICAL RULE: DO NOT modify the sign (+ or -) or value of the Amount. Return it EXACTLY as provided. Do not alter the Date or Description.
         
         Transactions:
         {transactions_text}
