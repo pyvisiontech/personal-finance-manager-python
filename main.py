@@ -889,7 +889,7 @@ async def webhook_events(request: Request):
 
         # Convert date safely
         dt = None
-        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d"):
+        for fmt in ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%d.%m.%Y"):
             try:
                 dt = datetime.strptime(raw_date, fmt)
                 break
