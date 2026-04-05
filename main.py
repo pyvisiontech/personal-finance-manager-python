@@ -695,7 +695,7 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
                 if "pdf" in file.headers.get("Content-Type", ""):
                     df = pdf_to_csv(file, client, model)
                     res = categorize_transactions_batch(
-                        client, df, amount_threshold=150, batch_size=50, 
+                        client, df, amount_threshold=0, batch_size=50, 
                         model=model, person_name=name, mobile_numbers=mob_no
                     )
                 else:
@@ -707,7 +707,7 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
                     # Step 2: Keep only columns present in mapping
                     df = df[[col for col in map.values() if col in df.columns]]
                     res = categorize_transactions_batch(
-                        client, df, amount_threshold=150, batch_size=50, 
+                        client, df, amount_threshold=0, batch_size=50, 
                         model=model, person_name=name, mobile_numbers=mob_no
                     )
 
