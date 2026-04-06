@@ -8,6 +8,7 @@ import tiktoken
 import json
 import re
 import fitz
+import pymupdf4llm
 import os
 import hmac
 import hashlib
@@ -341,15 +342,13 @@ def categorize_transactions_batch(client, df, amount_threshold=100, batch_size=2
 
 
 def extract_text(doc):
-    all_lines = []
-    for page in doc:
-        text = page.get_text("text")
-        lines = text.split('\n')
-        # Remove empty lines
-        lines = [line.strip() for line in lines if line.strip()]
-        all_lines.extend(lines)
-    extracted_text = "\n".join(all_lines)
-    return extracted_text
+    """
+    Extract text from PDF using pymupdf4llm which converts to Markdown.
+    This preserves table structure (Date, Narration, Debit, Credit columns)
+    much better than plain text extraction, improving LLM parsing accuracy.
+    """
+    markdown_text = pymupdf4llm.to_markdown(doc)
+    return markdown_text
 
 
 def download_file_from_s3(presigned_url):
