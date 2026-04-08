@@ -229,7 +229,7 @@ def count_tokens(prompt, model="gpt-4o-mini"):
 
 # Core processing functions 
 
-def categorize_transactions_batch(client, df, amount_threshold=100, batch_size=20, model="gpt-4o-mini", person_name='Abhishek', mobile_numbers='7206527787'):
+def categorize_transactions_batch(client, df, amount_threshold=0, batch_size=20, model="gpt-4o-mini", person_name='Abhishek', mobile_numbers='7206527787'):
     """
     Categorize transactions using LLM in batches with confidence scores.
     Handles 'Narration', 'Credit Amount', 'Debit Amount', and 'Date' columns.
