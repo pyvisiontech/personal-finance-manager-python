@@ -237,6 +237,10 @@ def categorize_transactions_batch(client, df, amount_threshold=0, batch_size=20,
     """
     results = []
 
+    # ✅ FIX: Convert columns to numeric, removing any commas or weird characters first
+    df["Credit Amount"] = pd.to_numeric(df["Credit Amount"].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    df["Debit Amount"] = pd.to_numeric(df["Debit Amount"].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+
     # Unified Amount column
     df["Amount"] = df["Credit Amount"].fillna(0) - df["Debit Amount"].fillna(0)
     df.rename(columns={"Narration": "Description"}, inplace=True)
@@ -377,6 +381,7 @@ def pdf_to_csv(file_response, client, model):
         - Output ONLY raw CSV, NO explanations or Markdown.
         - The FIRST LINE must be the header: Date,Narration,Debit Amount,Credit Amount
         - Each row should ONLY be: Date,Narration,Debit Amount,Credit Amount
+        - Use double quotes for Narration.
         - Leave fields blank if data not available, but keep all four columns.
         - CRITICAL RULE: Pay extreme attention to whether the amount falls under the 'Withdrawal Amount' or 'Deposit Amount' column in the original text. You MUST STRICTLY map 'Withdrawal' to the 'Debit Amount' column, and 'Deposit' or 'Credit' to the 'Credit Amount' column. Do not guess.
 
@@ -694,7 +699,7 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
                 if "pdf" in file.headers.get("Content-Type", ""):
                     df = pdf_to_csv(file, client, model)
                     res = categorize_transactions_batch(
-                        client, df, amount_threshold=0, batch_size=50, 
+                        client, df, amount_threshold=0, batch_size=20, 
                         model=model, person_name=name, mobile_numbers=mob_no
                     )
                 else:
@@ -706,7 +711,7 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
                     # Step 2: Keep only columns present in mapping
                     df = df[[col for col in map.values() if col in df.columns]]
                     res = categorize_transactions_batch(
-                        client, df, amount_threshold=0, batch_size=50, 
+                        client, df, amount_threshold=0, batch_size=20, 
                         model=model, person_name=name, mobile_numbers=mob_no
                     )
 
