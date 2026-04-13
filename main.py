@@ -331,6 +331,15 @@ def categorize_transactions_batch(client, df, amount_threshold=0, batch_size=20,
         # Parse JSON output
         logger.info(f"Categorization Stage response: {response}")
         raw_output = response.choices[0].message.content
+        
+        # ✅ DEBUG AUDIT: Save the raw JSON to see if AI is hallucinating or changing descriptions
+        try:
+            with open("debug_categorization_json.json", "w", encoding="utf-8") as f:
+                f.write(raw_output)
+            logger.info("📁 Debug: Categorization JSON saved to debug_categorization_json.json")
+        except Exception as e:
+            logger.error(f"Failed to save debug JSON: {e}")
+
         logger.info("✅ STAGE 2: LLM categorization JSON generated")
         batch_results = safe_parse_json(raw_output)
         if batch_results:
@@ -398,6 +407,15 @@ def pdf_to_csv(file_response, client, model):
         Here is the extracted text:
         {safe_text}
     """
+    
+    # ✅ DEBUG AUDIT: Save the raw Markdown from the PDF to check extraction quality
+    try:
+        with open("debug_raw_pdf_text.md", "w", encoding="utf-8") as f:
+            f.write(safe_text)
+        logger.info("📁 Debug: Raw PDF Markdown saved to debug_raw_pdf_text.md")
+    except Exception as e:
+        logger.error(f"Failed to save debug markdown: {e}")
+
     prompt_length = count_tokens(prompt, model="gpt-4o-mini")
     print("🔹 Prompt token length:", prompt_length)
     logger.info("Prompt length for converting pdf to csv: {prompt_length}")
@@ -413,6 +431,14 @@ def pdf_to_csv(file_response, client, model):
     csv_output = response.choices[0].message.content
     logger.info("✅ LLM parsed PDF to CSV successfully")
     
+    # ✅ DEBUG AUDIT: Save the raw CSV output to check extraction quality
+    try:
+        with open("debug_pdf_to_csv_output.csv", "w", encoding="utf-8") as f:
+            f.write(csv_output)
+        logger.info("📁 Debug: LLM CSV saved to debug_pdf_to_csv_output.csv")
+    except Exception as e:
+        logger.error(f"Failed to save debug CSV: {e}")
+
     # Save to CSV
     with open("bank_statement_parsed.csv", "w", encoding="utf-8") as f:
         f.write(csv_output)
