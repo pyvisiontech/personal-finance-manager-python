@@ -242,8 +242,15 @@ def categorize_transactions_batch(client, df, amount_threshold=0, batch_size=20,
     df["Debit Amount"] = pd.to_numeric(df["Debit Amount"].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
 
     # Unified Amount column
-    df["Amount"] = df["Credit Amount"].fillna(0) - df["Debit Amount"].fillna(0)
+    # ✅ FIX: Ensure numeric types before subtraction to avoid crash
+    df["Credit Amount"] = pd.to_numeric(df["Credit Amount"].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    df["Debit Amount"] = pd.to_numeric(df["Debit Amount"].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    
+    df["Amount"] = df["Credit Amount"] - df["Debit Amount"]
+    
+    # ✅ DEDUPE FIX: Normalize description (lowercase/strip) for consistent hashing
     df.rename(columns={"Narration": "Description"}, inplace=True)
+    df["Description"] = df["Description"].astype(str).str.strip().str.lower().str.replace(r'\s+', ' ', regex=True)
 
     # Filter rows for LLM
     df_to_process = df[df["Amount"].abs() >= amount_threshold].copy()
@@ -381,9 +388,9 @@ def pdf_to_csv(file_response, client, model):
         - Output ONLY raw CSV, NO explanations or Markdown.
         - The FIRST LINE must be the header: Date,Narration,Debit Amount,Credit Amount
         - Each row should ONLY be: Date,Narration,Debit Amount,Credit Amount
-        - Use double quotes for Narration.
-        - Leave fields blank if data not available, but keep all four columns.
-        - CRITICAL RULE: Pay extreme attention to whether the amount falls under the 'Withdrawal Amount' or 'Deposit Amount' column in the original text. You MUST STRICTLY map 'Withdrawal' to the 'Debit Amount' column, and 'Deposit' or 'Credit' to the 'Credit Amount' column. Do not guess.
+        - Use double quotes for Narration to avoid comma issues.
+        - DATE FORMAT RULE: You MUST output dates in YYYY-MM-DD format (e.g., 2026-03-31). If the year is missing from the text, use '2026'.
+        - CRITICAL RULE: Pay extreme attention to whether the amount falls under the 'Withdrawal' or 'Deposit' column. Map 'Withdrawal' to 'Debit Amount', and 'Deposit' to 'Credit Amount'.
 
         Here is the extracted text:
         {safe_text}
@@ -401,13 +408,30 @@ def pdf_to_csv(file_response, client, model):
 
     # Extract the CSV from the response
     csv_output = response.choices[0].message.content
-    logger.info("LLM response generated for pdf to csv")
+    logger.info("✅ LLM parsed PDF to CSV successfully")
+    
     # Save to CSV
     with open("bank_statement_parsed.csv", "w", encoding="utf-8") as f:
         f.write(csv_output)
-    df = pd.read_csv("bank_statement_parsed.csv")
-    logger.info("PDF to csv file written and read to return df")
+    
+    try:
+        df = pd.read_csv("bank_statement_parsed.csv")
+    except Exception as e:
+        logger.error(f"❌ Failed to read LLM CSV output: {e}")
+        return pd.DataFrame()
+    
+    # ✅ STABILITY FIX: Ensure Debit/Credit are numeric (removes commas/strings)
+    df["Credit Amount"] = pd.to_numeric(df["Credit Amount"].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    df["Debit Amount"] = pd.to_numeric(df["Debit Amount"].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+    
+    # ✅ DATE FIX: Ensure YYYY-MM-DD format regardless of AI output
+    try:
+        # We try to parse whatever the AI gave us and force it to YYYY-MM-DD
+        df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d')
+    except Exception as e:
+        logger.warning(f"⚠️ Date normalization failed for some rows: {e}")
 
+    logger.info(f"📊 PDF Step Complete: Found {len(df)} transactions")
     return df
 
 
@@ -693,15 +717,19 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
             api_key=os.getenv("OPENAI_API_KEY"),  # Deepseek free chat
         )
         model = "deepseek-chat"
+        logger.info(f"🚀 ENGINE START: Using model '{model}' with DeepSeek base URL")
 
         for file in file_list:
             try:
                 if "pdf" in file.headers.get("Content-Type", ""):
                     df = pdf_to_csv(file, client, model)
+                    
+                    # ✅ QUALITY FIX: Use batch_size=20 (matching successful local tests)
                     res = categorize_transactions_batch(
                         client, df, amount_threshold=0, batch_size=20, 
                         model=model, person_name=name, mobile_numbers=mob_no
                     )
+                    logger.info(f"✅ CATEGORY STEP: Categorized {len(res)} transactions via {model}")
                 else:
                     df = pd.read_csv(io.StringIO(file.content.decode('utf-8')))
                     ## columns intent
@@ -710,10 +738,13 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
                     df = df.rename(columns=map)
                     # Step 2: Keep only columns present in mapping
                     df = df[[col for col in map.values() if col in df.columns]]
+                    
+                    # ✅ QUALITY FIX: Use batch_size=20
                     res = categorize_transactions_batch(
                         client, df, amount_threshold=0, batch_size=20, 
                         model=model, person_name=name, mobile_numbers=mob_no
                     )
+                    logger.info(f"✅ CATEGORY STEP: Categorized {len(res)} transactions via {model}")
 
                 # ✅ FIX: Check if res is valid before concatenating
                 if res is not None and not res.empty:
