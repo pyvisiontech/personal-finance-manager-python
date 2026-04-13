@@ -329,9 +329,9 @@ def categorize_transactions_batch(client, df, amount_threshold=0, batch_size=20,
         )
 
         # Parse JSON output
-        logger.info(f"pdf to csv response: {response}")
+        logger.info(f"Categorization Stage response: {response}")
         raw_output = response.choices[0].message.content
-        logger.info("LLM response generated from main classifier")
+        logger.info("✅ STAGE 2: LLM categorization JSON generated")
         batch_results = safe_parse_json(raw_output)
         if batch_results:
             results.extend(batch_results)
@@ -390,6 +390,8 @@ def pdf_to_csv(file_response, client, model):
         - Each row should ONLY be: Date,Narration,Debit Amount,Credit Amount
         - Use double quotes for Narration to avoid comma issues.
         - DATE FORMAT RULE: You MUST output dates in YYYY-MM-DD format (e.g., 2026-03-31). If the year is missing from the text, use '2026'.
+        - TABLE AWARENESS: The input below is in Markdown format. Use the '|' separators and headers to identify exactly which amount belongs to which transaction row.
+        - NO HALLUCINATION: If a row does not have a clear amount in the 'Withdrawal' or 'Deposit' columns, SKIP IT. Do NOT copy-paste the amount from the line above.
         - CRITICAL RULE: Pay extreme attention to whether the amount falls under the 'Withdrawal' or 'Deposit' column. Map 'Withdrawal' to 'Debit Amount', and 'Deposit' to 'Credit Amount'.
 
         Here is the extracted text:
@@ -427,7 +429,7 @@ def pdf_to_csv(file_response, client, model):
     # ✅ DATE FIX: Ensure YYYY-MM-DD format regardless of AI output
     try:
         # We try to parse whatever the AI gave us and force it to YYYY-MM-DD
-        df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d')
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
     except Exception as e:
         logger.warning(f"⚠️ Date normalization failed for some rows: {e}")
 
@@ -723,13 +725,14 @@ async def classifier_main(file_list, name, mob_no, client_id, accountant_id, imp
             try:
                 if "pdf" in file.headers.get("Content-Type", ""):
                     df = pdf_to_csv(file, client, model)
+                    logger.info("✅ STAGE 1: PDF Extraction complete")
                     
                     # ✅ QUALITY FIX: Use batch_size=20 (matching successful local tests)
                     res = categorize_transactions_batch(
                         client, df, amount_threshold=0, batch_size=20, 
                         model=model, person_name=name, mobile_numbers=mob_no
                     )
-                    logger.info(f"✅ CATEGORY STEP: Categorized {len(res)} transactions via {model}")
+                    logger.info(f"✅ STAGE 2: Categorization complete ({len(res)} transactions)")
                 else:
                     df = pd.read_csv(io.StringIO(file.content.decode('utf-8')))
                     ## columns intent
