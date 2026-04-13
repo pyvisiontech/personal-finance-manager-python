@@ -391,6 +391,7 @@ def pdf_to_csv(file_response, client, model):
         - Use double quotes for Narration to avoid comma issues.
         - DATE FORMAT RULE: You MUST output dates in YYYY-MM-DD format (e.g., 2026-03-31). If the year is missing from the text, use '2026'.
         - TABLE AWARENESS: The input below is in Markdown format. Use the '|' separators and headers to identify exactly which amount belongs to which transaction row.
+        - IGNORE BALANCE: The table contains a 'Balance' column. You MUST IGNORE this column. Never use a number from the Balance column as a credit or debit.
         - NO HALLUCINATION: If a row does not have a clear amount in the 'Withdrawal' or 'Deposit' columns, SKIP IT. Do NOT copy-paste the amount from the line above.
         - CRITICAL RULE: Pay extreme attention to whether the amount falls under the 'Withdrawal' or 'Deposit' column. Map 'Withdrawal' to 'Debit Amount', and 'Deposit' to 'Credit Amount'.
 
