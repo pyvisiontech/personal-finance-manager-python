@@ -195,6 +195,23 @@ def safe_parse_json(raw):
 
 
 # PII redaction before sending text to LLM
+def upload_debug_to_supabase(filename: str, content: str):
+    """
+    Uploads debug text content to Supabase Storage bucket 'debug-dumps'.
+    Enables remote auditing of AI outputs without direct server access.
+    """
+    try:
+        file_data = content.encode('utf-8')
+        # We use upsert=True to overwrite the previous 'last' file for cleaner auditing
+        supabase.storage.from_('debug-dumps').upload(
+            path=filename,
+            file=file_data,
+            file_options={"cache-control": "3600", "upsert": "true"}
+        )
+        logger.info(f"📁 ✅ Debug dump uploaded to Supabase Storage: {filename}")
+    except Exception as e:
+        logger.error(f"📁 ❌ Failed to upload debug dump '{filename}' to Supabase: {e}")
+
 def redact_pii(text: str) -> str:
     # 1. Redact Indian PAN Card Numbers (e.g. ABCDE1234F)
     text = re.sub(r'[A-Z]{5}[0-9]{4}[A-Z]{1}', '[PAN_REDACTED]', text)
@@ -332,13 +349,14 @@ def categorize_transactions_batch(client, df, amount_threshold=0, batch_size=20,
         logger.info(f"Categorization Stage response: {response}")
         raw_output = response.choices[0].message.content
         
-        # ✅ DEBUG AUDIT: Save the raw JSON to see if AI is hallucinating or changing descriptions
+        # ✅ DEBUG AUDIT: Save and upload the raw JSON
         try:
             with open("debug_categorization_json.json", "w", encoding="utf-8") as f:
                 f.write(raw_output)
-            logger.info("📁 Debug: Categorization JSON saved to debug_categorization_json.json")
+            upload_debug_to_supabase("last_categorization.json", raw_output)
+            logger.info("📁 Debug: Categorization JSON saved and uploaded")
         except Exception as e:
-            logger.error(f"Failed to save debug JSON: {e}")
+            logger.error(f"Failed to handle debug JSON: {e}")
 
         logger.info("✅ STAGE 2: LLM categorization JSON generated")
         batch_results = safe_parse_json(raw_output)
@@ -389,32 +407,36 @@ def pdf_to_csv(file_response, client, model):
 
     # Construct the prompt
     prompt = f"""
-        You are an AI assistant specialized in parsing bank statements.
-        Your task is to extract all transactions into strictly the following CSV columns:
-        Date,Narration,Debit Amount,Credit Amount
+        You are an AI assistant specialized in parsing bank statements with complex layouts.
+        The input text below is a "Flow" extraction where rows might be broken across several lines. 
+        You MUST reconstruct each transaction by following these steps:
+        1. ANCHOR: Locate the Serial Number (S No) (e.g., 1, 2, 3...).
+        2. DATE: The Transaction Date is the date appearing immediately after or next to the S No.
+        3. NARRATION: The text following the date is the Transaction Remarks/Narration.
+        4. AMOUNT MAPPING: At the bottom of each section, there is a list of numbers. These are [Amount] [Balance] pairs. 
+           The 1st S No corresponds to the 1st pair in that list. The 10th S No corresponds to the 10th pair.
+        5. IGNORE BALANCE: The second number in each pair is the 'Balance'. You MUST IGNORE it.
+        6. OUTPUT: Date,Narration,Debit Amount,Credit Amount.
 
         Guidelines:
         - Output ONLY raw CSV, NO explanations or Markdown.
         - The FIRST LINE must be the header: Date,Narration,Debit Amount,Credit Amount
-        - Each row should ONLY be: Date,Narration,Debit Amount,Credit Amount
-        - Use double quotes for Narration to avoid comma issues.
-        - DATE FORMAT RULE: You MUST output dates in YYYY-MM-DD format (e.g., 2026-03-31). If the year is missing from the text, use '2026'.
-        - TABLE AWARENESS: The input below is in Markdown format. Use the '|' separators and headers to identify exactly which amount belongs to which transaction row.
-        - IGNORE BALANCE: The table contains a 'Balance' column. You MUST IGNORE this column. Never use a number from the Balance column as a credit or debit.
-        - RELIABLE EXTRACTION: Look closely at the 'Withdrawal' and 'Deposit' columns. Even if a row is complex, try your best to find the specific transaction value. Do not default to 0.0 unless the transaction truly has no value.
-        - CRITICAL RULE: Pay extreme attention to whether the amount falls under the 'Withdrawal' or 'Deposit' column. Map 'Withdrawal' to 'Debit Amount', and 'Deposit' to 'Credit Amount'.
+        - DATE FORMAT RULE: Output as YYYY-MM-DD. Use '2026' if the year is missing.
+        - RELIABLE EXTRACTION: Look closely at the list of numbers at the end of the text to find the correct amount for each S No.
+        - CRITICAL RULE: Map 'Withdrawal' to 'Debit Amount', and 'Deposit' to 'Credit Amount'.
 
         Here is the extracted text:
         {safe_text}
     """
     
-    # ✅ DEBUG AUDIT: Save the raw Markdown from the PDF to check extraction quality
+    # ✅ DEBUG AUDIT: Save and upload the raw Markdown
     try:
         with open("debug_raw_pdf_text.md", "w", encoding="utf-8") as f:
             f.write(safe_text)
-        logger.info(f"📁 Debug: Raw PDF Markdown saved. Preview:\n{safe_text[:3000]}")
+        upload_debug_to_supabase("last_pdf_markdown.md", safe_text)
+        logger.info(f"📁 Debug: Raw PDF Markdown saved and uploaded. Preview:\n{safe_text[:3000]}")
     except Exception as e:
-        logger.error(f"Failed to save debug markdown: {e}")
+        logger.error(f"Failed to handle debug markdown: {e}")
 
     prompt_length = count_tokens(prompt, model="gpt-4o-mini")
     print("🔹 Prompt token length:", prompt_length)
@@ -431,13 +453,14 @@ def pdf_to_csv(file_response, client, model):
     csv_output = response.choices[0].message.content
     logger.info("✅ LLM parsed PDF to CSV successfully")
     
-    # ✅ DEBUG AUDIT: Save the raw CSV output to check extraction quality
+    # ✅ DEBUG AUDIT: Save and upload the raw CSV
     try:
         with open("debug_pdf_to_csv_output.csv", "w", encoding="utf-8") as f:
             f.write(csv_output)
-        logger.info("📁 Debug: LLM CSV saved to debug_pdf_to_csv_output.csv")
+        upload_debug_to_supabase("last_pdf_extraction.csv", csv_output)
+        logger.info("📁 Debug: LLM CSV saved and uploaded")
     except Exception as e:
-        logger.error(f"Failed to save debug CSV: {e}")
+        logger.error(f"Failed to handle debug CSV: {e}")
 
     # Save to CSV
     with open("bank_statement_parsed.csv", "w", encoding="utf-8") as f:
