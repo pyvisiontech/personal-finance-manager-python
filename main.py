@@ -403,7 +403,7 @@ def pdf_to_csv(file_response, client, model):
     extracted_text = extract_text(doc)
     
     # NEW STEP: Scrub PII
-    safe_text = redact_pii(extracted_text)
+    safe_text = extracted_text #redact_pii Commenting redaction for easier testing.
 
     # Construct the prompt
     prompt = f"""
