@@ -407,23 +407,15 @@ def pdf_to_csv(file_response, client, model):
 
     # Construct the prompt
     prompt = f"""
-        You are an AI assistant specialized in parsing bank statements with complex layouts.
-        The input text below is a "Flow" extraction where rows might be broken across several lines. 
-        You MUST reconstruct each transaction by following these steps:
-        1. ANCHOR: Locate the Serial Number (S No) (e.g., 1, 2, 3...).
-        2. DATE: The Transaction Date is the date appearing immediately after or next to the S No.
-        3. NARRATION: The text following the date is the Transaction Remarks/Narration.
-        4. AMOUNT MAPPING: At the bottom of each section, there is a list of numbers. These are [Amount] [Balance] pairs. 
-           The 1st S No corresponds to the 1st pair in that list. The 10th S No corresponds to the 10th pair.
-        5. IGNORE BALANCE: The second number in each pair is the 'Balance'. You MUST IGNORE it.
-        6. OUTPUT: Date,Narration,Debit Amount,Credit Amount.
+        You are an AI assistant specialized in parsing bank statements.
+        Your task is to extract all transactions into strictly the following CSV columns:
+        Date,Narration,Debit Amount,Credit Amount
 
         Guidelines:
         - Output ONLY raw CSV, NO explanations or Markdown.
         - The FIRST LINE must be the header: Date,Narration,Debit Amount,Credit Amount
-        - DATE FORMAT RULE: Output as YYYY-MM-DD. Use '2026' if the year is missing.
-        - RELIABLE EXTRACTION: Look closely at the list of numbers at the end of the text to find the correct amount for each S No.
-        - CRITICAL RULE: Map 'Withdrawal' to 'Debit Amount', and 'Deposit' to 'Credit Amount'.
+        - Each row should ONLY be: Date,Narration,Debit Amount,Credit Amount
+        - Leave fields blank if data not available, but keep all four columns.
 
         Here is the extracted text:
         {safe_text}
