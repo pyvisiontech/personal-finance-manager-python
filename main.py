@@ -13,6 +13,7 @@ import os
 import hmac
 import hashlib
 from supabase_client import fetch_supabase_db, fetch_supabase_cat_db, upsert_category
+from pdf_extractor import _get_column_order, _extract_page_transactions
 from pydantic import BaseModel
 import requests
 import asyncio
@@ -402,77 +403,122 @@ def download_file_from_s3(presigned_url):
 def pdf_to_csv(file_response, client, model):
     pdf_bytes = file_response.content
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    extracted_text = extract_text(doc)
-    
-    # NEW STEP: Scrub PII
-    safe_text = extracted_text #redact_pii Commenting redaction for easier testing.
 
-    # Construct the prompt
-    prompt = f"""
-        You are an AI assistant specialized in parsing bank statements.
-        Your task is to extract all transactions into strictly the following CSV columns:
-        Date,Narration,Debit Amount,Credit Amount
+    df = None
 
-        Guidelines:
-        - Output ONLY raw CSV, NO explanations or Markdown.
-        - The FIRST LINE must be the header: Date,Narration,Debit Amount,Credit Amount
-        - Each row should ONLY be: Date,Narration,Debit Amount,Credit Amount
-        - Leave fields blank if data not available, but keep all four columns.
+    # ── Step 1: Detect column order from first 200 words ─────────────────────
+    column_order = _get_column_order(doc, client, model)
 
-        Here is the extracted text:
-        {safe_text}
-    """
-    
-    # ✅ DEBUG AUDIT: Save and upload the raw Markdown
-    try:
-        with open("debug_raw_pdf_text.md", "w", encoding="utf-8") as f:
-            f.write(safe_text)
-        upload_debug_to_supabase("last_pdf_markdown.md", safe_text)
-        logger.info(f"📁 Debug: Raw PDF Markdown saved and uploaded. Preview:\n{safe_text[:3000]}")
-    except Exception as e:
-        logger.error(f"Failed to handle debug markdown: {e}")
+    if column_order:
+        logger.info(f"✅ STAGE 1: Column order detected — {column_order}")
 
-    prompt_length = count_tokens(prompt, model="gpt-4o-mini")
-    print("🔹 Prompt token length:", prompt_length)
-    logger.info("Prompt length for converting pdf to csv: {prompt_length}")
+        # ── Step 2: Extract transactions page by page ─────────────────────────
+        all_rows = []
+        for page_num, page in enumerate(doc):
+            rows = _extract_page_transactions(page, column_order, client, model)
+            logger.info(f"Page {page_num + 1}: {len(rows)} transactions extracted")
+            all_rows.extend(rows)
 
-    # Make the OpenAI API call
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=8000
-    )
+        if all_rows:
+            # ── Step 3: Assemble DataFrame ────────────────────────────────────
+            df = pd.DataFrame(all_rows)
+            df = df.rename(columns={
+                "date": "Date",
+                "narration": "Narration",
+                "debit_amount": "Debit Amount",
+                "credit_amount": "Credit Amount",
+            })
+            # Drop rows where both amounts are null/missing
+            has_debit  = df.get("Debit Amount",  pd.Series(dtype=str)).replace("null", None).notna()
+            has_credit = df.get("Credit Amount", pd.Series(dtype=str)).replace("null", None).notna()
+            df = df[has_debit | has_credit].copy()
 
-    # Extract the CSV from the response
-    csv_output = response.choices[0].message.content
-    logger.info("✅ LLM parsed PDF to CSV successfully")
-    
-    # ✅ DEBUG AUDIT: Save and upload the raw CSV
-    try:
-        with open("debug_pdf_to_csv_output.csv", "w", encoding="utf-8") as f:
+            try:
+                raw_csv = df.to_csv(index=False)
+                with open("debug_pdf_raw_table.csv", "w", encoding="utf-8") as f:
+                    f.write(raw_csv)
+                upload_debug_to_supabase("last_pdf_raw_table.csv", raw_csv)
+                logger.info("📁 Debug: raw words-extracted table saved and uploaded")
+            except Exception as e:
+                logger.error(f"Failed to upload debug raw table: {e}")
+
+            logger.info(f"✅ STAGE 1: Words extraction succeeded — {len(df)} rows")
+        else:
+            logger.warning("⚠️ No transactions extracted from any page. Falling back to LLM extraction.")
+            df = None
+
+    # ── Fallback: original get_text("text") → LLM path ───────────────────────
+    if df is None or df.empty:
+        reason = "no_transactions" if column_order else "column_detection_failed"
+        logger.warning(f"⚠️ Words extraction failed ({reason}). Falling back to LLM extraction.")
+
+        extracted_text = extract_text(doc)
+        safe_text = extracted_text  # redact_pii commented out for easier testing
+
+        try:
+            with open("debug_raw_pdf_text.md", "w", encoding="utf-8") as f:
+                f.write(safe_text)
+            upload_debug_to_supabase("last_pdf_markdown.md", safe_text)
+            logger.info(f"📁 Debug: Raw PDF text saved. Preview:\n{safe_text[:3000]}")
+        except Exception as e:
+            logger.error(f"Failed to handle debug markdown: {e}")
+
+        prompt = f"""
+            You are an AI assistant specialized in parsing bank statements.
+            Your task is to extract all transactions into strictly the following CSV columns:
+            Date,Narration,Debit Amount,Credit Amount
+
+            Guidelines:
+            - Output ONLY raw CSV, NO explanations or Markdown.
+            - The FIRST LINE must be the header: Date,Narration,Debit Amount,Credit Amount
+            - Each row should ONLY be: Date,Narration,Debit Amount,Credit Amount
+            - Leave fields blank if data not available, but keep all four columns.
+
+            Here is the extracted text:
+            {safe_text}
+        """
+
+        prompt_length = count_tokens(prompt, model="gpt-4o-mini")
+        print("🔹 Prompt token length:", prompt_length)
+        logger.info(f"Prompt length for LLM fallback extraction: {prompt_length}")
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=8000
+        )
+
+        csv_output = response.choices[0].message.content
+        logger.info("✅ LLM fallback parsed PDF to CSV successfully")
+
+        try:
+            with open("debug_pdf_to_csv_output.csv", "w", encoding="utf-8") as f:
+                f.write(csv_output)
+            upload_debug_to_supabase("last_pdf_extraction.csv", csv_output)
+            logger.info("📁 Debug: LLM CSV saved and uploaded")
+        except Exception as e:
+            logger.error(f"Failed to handle debug CSV: {e}")
+
+        with open("bank_statement_parsed.csv", "w", encoding="utf-8") as f:
             f.write(csv_output)
-        upload_debug_to_supabase("last_pdf_extraction.csv", csv_output)
-        logger.info("📁 Debug: LLM CSV saved and uploaded")
-    except Exception as e:
-        logger.error(f"Failed to handle debug CSV: {e}")
 
-    # Save to CSV
-    with open("bank_statement_parsed.csv", "w", encoding="utf-8") as f:
-        f.write(csv_output)
-    
+        try:
+            df = pd.read_csv("bank_statement_parsed.csv")
+        except Exception as e:
+            logger.error(f"❌ Failed to read LLM CSV output: {e}")
+            return pd.DataFrame()
+
+    # ── Common cleanup — applies to both paths ────────────────────────────────
+    if "Credit Amount" in df.columns:
+        df["Credit Amount"] = pd.to_numeric(
+            df["Credit Amount"].astype(str).str.replace(',', ''), errors='coerce'
+        ).fillna(0)
+    if "Debit Amount" in df.columns:
+        df["Debit Amount"] = pd.to_numeric(
+            df["Debit Amount"].astype(str).str.replace(',', ''), errors='coerce'
+        ).fillna(0)
+
     try:
-        df = pd.read_csv("bank_statement_parsed.csv")
-    except Exception as e:
-        logger.error(f"❌ Failed to read LLM CSV output: {e}")
-        return pd.DataFrame()
-    
-    # ✅ STABILITY FIX: Ensure Debit/Credit are numeric (removes commas/strings)
-    df["Credit Amount"] = pd.to_numeric(df["Credit Amount"].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    df["Debit Amount"] = pd.to_numeric(df["Debit Amount"].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-    
-    # ✅ DATE FIX: Ensure YYYY-MM-DD format regardless of AI output
-    try:
-        # We try to parse whatever the AI gave us and force it to YYYY-MM-DD
         df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
     except Exception as e:
         logger.warning(f"⚠️ Date normalization failed for some rows: {e}")
