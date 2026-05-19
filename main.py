@@ -289,10 +289,11 @@ def categorize_transactions_batch(client, df, amount_threshold=0, batch_size=20,
         You are an expert accounting assistant. Categorize the following bank transactions using Description, Amount, and Date.
         
         Rules for categorization:
-        1. Categories include (but are not limited to): 
-           Food, Travel, Office Supplies, Client Expense, Dividend, Investment, Investment Withdrawal, 
-           Profit from Investment, Interest, Tax, Regular recurring Salary, UPI Transfer, Shopping, 
-           Entertainment, Rent, Self transfer, Mobile Recharge, Miscellaneous.
+        1. Categories include (but are not limited to):
+           Food, Travel, Office Supplies, Client Expense, Dividend, Investment, Investment Withdrawal,
+           Profit from Investment, Interest, Tax, Regular recurring Salary, UPI Transfer, Shopping,
+           Entertainment, Rent, Self transfer, Mobile Recharge, Medical/Healthcare, Utilities,
+           Credit Card Payment, Miscellaneous.
         
         2. Specific clarifications:
            - If Amount > 0 (deposit/credit), it CANNOT be categorized as "Investment".
@@ -304,6 +305,9 @@ def categorize_transactions_batch(client, df, amount_threshold=0, batch_size=20,
              • If it is clearly P2P (names/emails/phone numbers), categorize as "UPI Transfer".
              • If the transaction description or UPI ID contains the **account holder name or mobile number(s)** provided to you (see *Person data* below), treat it as a "Self transfer" when sender and receiver are the same person.
            - Salary credits should be mapped to "Regular recurring Salary".
+           - If the merchant appears to be a hospital, clinic, pharmacy, or healthcare provider (keywords: "hospital", "clinic", "med", "pharma", "health"), categorize as "Medical/Healthcare".
+           - If the transaction appears to be a broadband or internet bill payment, categorize as "Utilities".
+           - If the transaction appears to be a credit card bill payment, categorize as "Credit Card Payment".
         
         3. **Consistency rule (NEW)**:
            - If multiple transactions in this batch share the same normalized merchant name (normalize by removing numeric IDs, UTR strings, `CR/DR` tokens, and punctuation), ensure they are assigned the **same Category** across the batch. If the model is unsure, choose the category that appears most frequent among those similar transactions (majority). If a tie, choose the category with higher confidence.
@@ -519,7 +523,7 @@ def pdf_to_csv(file_response, client, model):
         ).fillna(0)
 
     try:
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+        df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce').dt.strftime('%Y-%m-%d')
     except Exception as e:
         logger.warning(f"⚠️ Date normalization failed for some rows: {e}")
 

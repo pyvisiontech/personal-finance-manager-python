@@ -44,8 +44,8 @@ def _parse_json_response(raw: str) -> list | None:
 
 def _get_column_order(doc, client, model) -> list | None:
     """
-    Detect column names from the first 200 words of the document.
-    Returns ordered list of column name strings, or None on failure.
+    Detect column names and x-centers from the first 200 words of the document.
+    Returns list of {"name": str, "x_center": float} dicts ordered left-to-right, or None on failure.
     """
     words = doc[0].get_text("words")
     if not words:
@@ -71,8 +71,12 @@ Some column names span multiple lines (incrementing y0) — combine them into on
 Multi-line parts of the same column header may have slightly different x0 values due to
 center-alignment — use horizontal center to group them into the same column.
 
-Return ONLY a JSON array of column names in left-to-right order.
+For each column header, compute its x_center as the average of x0 and x1 across all words
+that make up that column header.
+
+Return ONLY a JSON array of objects in left-to-right order, each with "name" and "x_center".
 No explanation, no markdown — just the JSON array.
+Example format: [{{"name": "Date", "x_center": 45.2}}, {{"name": "Debit", "x_center": 380.1}}]
 
 Actual data:
 {word_data}"""
@@ -88,7 +92,7 @@ Actual data:
     logger.info(f"_get_column_order raw response: {raw}")
 
     column_order = _parse_json_response(raw)
-    if column_order and len(column_order) >= 2:
+    if column_order and len(column_order) >= 2 and isinstance(column_order[0], dict):
         logger.info(f"Detected column order: {column_order}")
         return column_order
 
@@ -118,9 +122,13 @@ Data format: (x0, y0, x1, y1, "text")
   from natural gaps in y0 values
 - A word's column is determined by its x position
 
-Column order (left to right): {column_order}
-The header row may be absent on this page — use the column order above as reference
-for assigning words to the correct column.
+Column positions (name and x-center of header in pixels): {column_order}
+
+To assign each amount to the correct column:
+- Compute the word's x-center = (x0 + x1) / 2
+- Compare it to the x_center of the Debit column header and the Credit column header
+- Assign the amount to whichever column header x_center is closest
+- Use x-coordinates as the sole basis for debit/credit assignment
 
 Some narrations span multiple lines — merge them into a single narration string.
 
